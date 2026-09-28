@@ -160,7 +160,8 @@ const KiotViet = {
     const CAN = {
       code: 'ma hoa don', time: 'thoi gian', kcode: 'ma khach hang', name: 'ten khach hang',
       phone: 'dien thoai', pay: 'khach can tra', status: 'trang thai',
-      icode: 'ma hang', iname: 'ten hang', qty: 'so luong', total: 'thanh tien'
+      icode: 'ma hang', iname: 'ten hang', qty: 'so luong', total: 'thanh tien',
+      seller: 'nguoi ban'     // thợ cắt — KiotViet gọi là "Người bán"
     };
 
     /* Lấy trang tính nào có cột "Mã hóa đơn" — tên tệp trang tính bên
@@ -204,7 +205,7 @@ const KiotViet = {
       if (!h){
         h = {c: code, t: this.when(r[col.time]), p: this.phone(r[col.phone]),
              n: String(r[col.name] || '').trim(), k: String(r[col.kcode] || '').trim(),
-             a: Number(r[col.pay]) || 0, i: []};
+             a: Number(r[col.pay]) || 0, b: col.seller != null ? String(r[col.seller] || '').trim() : '', i: []};
         byCode.set(code, h);
       }
       h.i.push([String(r[col.icode] || '').trim(), String(r[col.iname] || '').trim(),

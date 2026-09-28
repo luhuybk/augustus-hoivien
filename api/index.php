@@ -66,8 +66,21 @@ function customerCard(int $cid, array $u): array {
     'tier'    => $tier,
     'rewards' => mhCustomerRewards($cid),
     'visits'  => $visits,
+    /* Thợ quen, và thợ của lượt gần nhất — quầy chọn sẵn thợ đó khi ghi
+       lượt mới, vì khách quen phần lớn cắt lại đúng người cũ. */
+    'barbers' => mhCustomerBarbers($cid),
+    'last_barber_id' => (function () use ($cid) {
+      $st = db()->prepare('SELECT barber_id FROM visits WHERE customer_id = ? AND void_at IS NULL
+                             AND barber_id IS NOT NULL ORDER BY visit_date DESC, id DESC LIMIT 1');
+      $st->execute([$cid]);
+      $b = $st->fetchColumn();
+      return $b === false ? null : (int)$b;
+    })(),
   ];
   if ($owner) {
+    $st = db()->prepare('SELECT phone FROM customer_aliases WHERE customer_id = ? ORDER BY created_at');
+    $st->execute([$cid]);
+    $ra['aliases'] = $st->fetchAll(PDO::FETCH_COLUMN);
     $st = db()->prepare('SELECT g.*, p.name AS program, u.name AS by_name FROM rewards_given g
                            JOIN programs p ON p.id = g.program_id
                       LEFT JOIN users u ON u.id = g.given_by
@@ -104,6 +117,7 @@ function allCustomers(): array {
                          WHERE void_at IS NULL AND flags LIKE '%NO_INVOICE%' GROUP BY customer_id")->fetchAll() as $r)
     $flag[(int)$r['customer_id']] = (int)$r['n'];
 
+  $tho = mhMainBarbers();
   $ra = [];
   foreach (db()->query('SELECT * FROM customers ORDER BY name')->fetchAll() as $c) {
     $cid = (int)$c['id'];
@@ -117,6 +131,7 @@ function allCustomers(): array {
     $ra[] = ['id' => $cid, 'name' => $c['name'], 'phone' => $c['phone'],
              'visits' => $s['visits'], 'cuts' => $s['cuts'], 'spend' => $s['spend'], 'last' => $s['last'],
              'tier_id' => $t ? $t['id'] : null, 'pending' => $pend, 'flagged' => $flag[$cid] ?? 0,
+             'barber_id' => $tho[$cid] ?? null,
              'created_at' => (int)$c['created_at']];
   }
   return $ra;
@@ -198,14 +213,20 @@ case 'search': {
     if (!mhIsOwner($u) && strlen($digits) !== 4) {
       $digits = mhPhone($digits);
       if (strlen($digits) < 10) out(['ok' => false, 'error' => 'Gõ 4 số cuối, hoặc đủ cả số điện thoại.'], 400);
-      $st = db()->prepare('SELECT * FROM customers WHERE phone = ?');
-      $st->execute([$digits]);
+      $st = db()->prepare('SELECT * FROM customers WHERE phone = ?
+                            OR id IN (SELECT customer_id FROM customer_aliases WHERE phone = ?)');
+      $st->execute([$digits, $digits]);
     } elseif (strlen($digits) === 4) {
-      $st = db()->prepare('SELECT * FROM customers WHERE last4 = ? ORDER BY name LIMIT 30');
-      $st->execute([$digits]);
+      /* Cả khách có số CŨ mang đuôi này — khách đổi số hay đọc nhầm số cũ. */
+      $st = db()->prepare('SELECT * FROM customers WHERE last4 = ?
+                            OR id IN (SELECT customer_id FROM customer_aliases WHERE last4 = ?)
+                          ORDER BY name LIMIT 30');
+      $st->execute([$digits, $digits]);
     } else {
-      $st = db()->prepare('SELECT * FROM customers WHERE phone LIKE ? ORDER BY name LIMIT 30');
-      $st->execute(['%' . mhPhone($digits) . '%']);
+      $st = db()->prepare('SELECT * FROM customers WHERE phone LIKE ?
+                            OR id IN (SELECT customer_id FROM customer_aliases WHERE phone LIKE ?)
+                          ORDER BY name LIMIT 30');
+      $st->execute(['%' . mhPhone($digits) . '%', '%' . mhPhone($digits) . '%']);
     }
     $rows = $st->fetchAll();
   } else {
@@ -244,9 +265,7 @@ case 'customer_create': {
   if (!preg_match('/^0\d{9}$/', $phone))
     out(['ok' => false, 'error' => 'Số điện thoại phải đủ 10 số, bắt đầu bằng 0.'], 400);
 
-  $st = db()->prepare('SELECT id, name FROM customers WHERE phone = ?');
-  $st->execute([$phone]);
-  if ($c = $st->fetch())
+  if ($c = mhFindByPhone($phone))
     out(['ok' => false, 'code' => 'exists', 'id' => (int)$c['id'],
          'error' => 'Số này đã có trong danh sách: ' . ($c['name'] ?: 'chưa có tên') . '.'], 409);
 
@@ -264,12 +283,21 @@ case 'customer_update': {
   $c = mhCustomerRow($id);
   if (!$c) out(['ok' => false, 'error' => 'Không tìm thấy khách.'], 404);
   if (strlen($phone) < 9) out(['ok' => false, 'error' => 'Số điện thoại chưa đúng.'], 400);
-  $st = db()->prepare('SELECT name FROM customers WHERE phone = ? AND id <> ?');
-  $st->execute([$phone, $id]);
-  if ($khac = $st->fetchColumn())
-    out(['ok' => false, 'error' => 'Số này đang thuộc về khách "' . $khac . '".'], 409);
-  db()->prepare('UPDATE customers SET name = ?, phone = ?, last4 = ?, note = ? WHERE id = ?')
+  $khac = mhFindByPhone($phone);
+  if ($khac && $khac['id'] !== $id)
+    out(['ok' => false, 'error' => 'Số này đang thuộc về khách "' . $khac['name']
+         . '". Nếu là cùng một người thì dùng "Gộp khách trùng".'], 409);
+  $pdo = db();
+  $pdo->beginTransaction();
+  /* Đổi số: giữ số cũ làm số phụ — hoá đơn KiotViet cũ mang số cũ vẫn về
+     đúng người, và khách đọc số cũ ở quầy vẫn tra ra. */
+  if ($c['phone'] !== $phone) {
+    mhAddAlias($c['phone'], $id);
+    $pdo->prepare('DELETE FROM customer_aliases WHERE phone = ?')->execute([$phone]);
+  }
+  $pdo->prepare('UPDATE customers SET name = ?, phone = ?, last4 = ?, note = ? WHERE id = ?')
       ->execute([$name, $phone, substr($phone, -4), $note, $id]);
+  $pdo->commit();
   mhAudit($u['id'], 'customer_update', "#$id " . $c['name'] . ($c['phone'] !== $phone ? ' · đổi số' : ''));
   out(['ok' => true] + customerCard($id, $u));
 }
@@ -324,14 +352,23 @@ case 'visit_add': {
            . ($gio ? ' lúc ' . $gio : '') . '. Nếu thật sự cắt lần hai, nhờ chủ quán ghi thêm.'], 409);
   }
 
+  /* Thợ cắt: quầy bắt buộc chọn khi quán đã khai thợ — dữ liệu "khách
+     này hay cắt với ai" chỉ có giá trị khi lượt nào cũng có. */
+  $bid = (int)inp('barber_id', 0) ?: null;
+  $dsTho = mhBarbers(true);
+  if ($bid !== null && !in_array($bid, array_column(mhBarbers(), 'id'), true))
+    out(['ok' => false, 'error' => 'Thợ này không còn trong danh sách. Tải lại trang.'], 400);
+  if ($bid === null && $dsTho && !$owner)
+    out(['ok' => false, 'error' => 'Chọn thợ cắt cho lượt này.'], 400);
+
   $truoc = pendingKeys($cid);
 
   $pdo = db();
   $pdo->beginTransaction();
-  $pdo->prepare('INSERT INTO visits (customer_id, visit_date, visit_time, amount, source, note, created_at, created_by)
-                 VALUES (?,?,?,?,?,?,?,?)')
+  $pdo->prepare('INSERT INTO visits (customer_id, visit_date, visit_time, amount, source, note, barber_id, created_at, created_by)
+                 VALUES (?,?,?,?,?,?,?,?,?)')
       ->execute([$cid, $date, $date === mhToday() ? date('H:i') : '', $amount,
-                 $owner ? 'owner' : 'counter', trim((string)inp('note', '')), time(), $u['id']]);
+                 $owner ? 'owner' : 'counter', trim((string)inp('note', '')), $bid, time(), $u['id']]);
   $vid = (int)$pdo->lastInsertId();
   $ins = $pdo->prepare('INSERT INTO visit_items (visit_id, service_id, name, kind, qty, price) VALUES (?,?,?,?,1,?)');
   foreach ($rows as $r) $ins->execute([$vid, $r[0], $r[1], $r[2], $r[3]]);
@@ -365,6 +402,129 @@ case 'visit_void': {
       ->execute([time(), $u['id'], $reason, $id]);
   mhAudit($u['id'], 'visit_void', "#$id khách #" . $v['customer_id'] . ' · ' . $reason);
   out(['ok' => true] + customerCard((int)$v['customer_id'], $u));
+}
+
+/* Đổi thợ của một lượt đã ghi (chọn nhầm). Cùng luật với huỷ lượt: quầy
+   chỉ sửa được lượt mình vừa ghi, trong vài phút. */
+case 'visit_barber': {
+  $u = mhRequireUser();
+  $id  = (int)inp('id', 0);
+  $bid = (int)inp('barber_id', 0) ?: null;
+  $st = db()->prepare('SELECT * FROM visits WHERE id = ?');
+  $st->execute([$id]);
+  $v = $st->fetch();
+  if (!$v || $v['void_at'] !== null) out(['ok' => false, 'error' => 'Không tìm thấy lượt này.'], 404);
+  if (!mhIsOwner($u) && ($v['source'] !== 'counter' || (int)$v['created_by'] !== $u['id']
+                         || (int)$v['created_at'] < time() - MH_UNDO_MINUTES * 60))
+    out(['ok' => false, 'error' => 'Chỉ sửa được lượt mình vừa ghi trong ' . MH_UNDO_MINUTES . ' phút.'], 403);
+  if ($bid !== null && !in_array($bid, array_column(mhBarbers(), 'id'), true))
+    out(['ok' => false, 'error' => 'Không có thợ này.'], 400);
+  db()->prepare('UPDATE visits SET barber_id = ? WHERE id = ?')->execute([$bid, $id]);
+  mhAudit($u['id'], 'visit_barber', "#$id → thợ #" . ($bid ?? 0));
+  out(['ok' => true] + customerCard((int)$v['customer_id'], $u));
+}
+
+/* Gộp khách trùng: mọi lượt, quà đã trao, số phụ của khách "from" chuyển
+   sang khách "into", số chính của "from" thành số phụ của "into", rồi xoá
+   "from". Dùng khi một người có hai số, hoặc lỡ tạo hai lần. */
+case 'customer_merge': {
+  $u = mhRequireOwner();
+  $into = (int)inp('into', 0);
+  $from = (int)inp('from', 0);
+  $a = mhCustomerRow($into); $b = mhCustomerRow($from);
+  if (!$a || !$b) out(['ok' => false, 'error' => 'Không tìm thấy khách.'], 404);
+  if ($into === $from) out(['ok' => false, 'error' => 'Không gộp một khách với chính họ.'], 400);
+
+  $pdo = db();
+  $pdo->beginTransaction();
+  $pdo->prepare('UPDATE visits SET customer_id = ? WHERE customer_id = ?')->execute([$into, $from]);
+
+  /* Quà đã trao: hai người cùng đã nhận quà mốc 3 thì sau khi gộp là hai
+     phần quà — đánh số lại theo thứ tự thời gian đã trao, để không mất
+     dòng nào và cũng không trao lại phần đã trao. */
+  $st = $pdo->prepare('SELECT * FROM rewards_given WHERE customer_id IN (?,?) ORDER BY program_id, given_at, id');
+  $st->execute([$into, $from]);
+  $qua = $st->fetchAll();
+  $pdo->prepare('DELETE FROM rewards_given WHERE customer_id IN (?,?)')->execute([$into, $from]);
+  $ins = $pdo->prepare('INSERT INTO rewards_given (customer_id, program_id, seq, gift, at_count, given_at, given_by)
+                        VALUES (?,?,?,?,?,?,?)');
+  $dem = [];
+  foreach ($qua as $g) {
+    $p = (int)$g['program_id'];
+    $dem[$p] = ($dem[$p] ?? -1) + 1;
+    $ins->execute([$into, $p, $dem[$p], $g['gift'], $g['at_count'], $g['given_at'], $g['given_by']]);
+  }
+
+  $pdo->prepare('UPDATE customer_aliases SET customer_id = ? WHERE customer_id = ?')->execute([$into, $from]);
+  $ghi = trim($a['note'] . "\nĐã gộp từ " . ($b['name'] ?: '(chưa tên)') . ' · ' . $b['phone'] . ' · ' . date('d/m/Y'));
+  $pdo->prepare('UPDATE customers SET note = ?, kv_code = COALESCE(kv_code, ?),
+                                      name = CASE WHEN name = \'\' THEN ? ELSE name END WHERE id = ?')
+      ->execute([$ghi, $b['kv_code'], $b['name'], $into]);
+  $pdo->prepare('DELETE FROM customers WHERE id = ?')->execute([$from]);
+  mhAddAlias($b['phone'], $into);
+  $pdo->commit();
+
+  mhAudit($u['id'], 'customer_merge', '#' . $from . ' ' . $b['name'] . ' (' . $b['phone'] . ') → #' . $into . ' ' . $a['name']);
+  out(['ok' => true] + customerCard($into, $u));
+}
+
+/* Bỏ một số phụ (lỡ gộp nhầm số của người khác vào). */
+case 'alias_del': {
+  $u = mhRequireOwner();
+  $phone = mhPhone((string)inp('phone', ''));
+  $st = db()->prepare('SELECT customer_id FROM customer_aliases WHERE phone = ?');
+  $st->execute([$phone]);
+  $cid = (int)$st->fetchColumn();
+  if (!$cid) out(['ok' => false, 'error' => 'Không có số phụ này.'], 404);
+  db()->prepare('DELETE FROM customer_aliases WHERE phone = ?')->execute([$phone]);
+  mhAudit($u['id'], 'alias_del', "khách #$cid · " . $phone);
+  out(['ok' => true] + customerCard($cid, $u));
+}
+
+/* ===== thợ cắt ===== */
+
+case 'barbers': {
+  $u = mhRequireUser();
+  if (!mhIsOwner($u)) out(['ok' => true, 'rows' => mhBarbers(true)]);
+  /* Chủ xem kèm số liệu từng thợ: tổng lượt, số khách, và số khách coi
+     thợ đó là thợ chính (khách quen — từ 3 lượt trở lên). */
+  $rows = mhBarbers();
+  $tk = [];
+  foreach (db()->query('SELECT barber_id, COUNT(*) n, COUNT(DISTINCT customer_id) k, MAX(visit_date) last
+                          FROM visits WHERE void_at IS NULL AND barber_id IS NOT NULL GROUP BY barber_id')->fetchAll() as $r)
+    $tk[(int)$r['barber_id']] = $r;
+  $quen = [];
+  $st = mhStats();
+  foreach (mhMainBarbers() as $cid => $bid)
+    if (($st[$cid]['visits'] ?? 0) >= 3) $quen[$bid] = ($quen[$bid] ?? 0) + 1;
+  foreach ($rows as &$b) {
+    $b['visits'] = (int)($tk[$b['id']]['n'] ?? 0);
+    $b['customers'] = (int)($tk[$b['id']]['k'] ?? 0);
+    $b['last'] = $tk[$b['id']]['last'] ?? null;
+    $b['loyal'] = $quen[$b['id']] ?? 0;
+  }
+  unset($b);
+  out(['ok' => true, 'rows' => $rows]);
+}
+
+case 'barbers_save': {
+  $u = mhRequireOwner();
+  $rows = inp('rows', []);
+  if (!is_array($rows)) out(['ok' => false, 'error' => 'Dữ liệu không đúng.'], 400);
+  $pdo = db();
+  $pdo->beginTransaction();
+  $up  = $pdo->prepare('UPDATE barbers SET name = ?, kv_name = ?, active = ?, sort = ? WHERE id = ?');
+  $ins = $pdo->prepare('INSERT INTO barbers (name, kv_name, active, sort, created_at) VALUES (?,?,?,?,?)');
+  foreach (array_values($rows) as $i => $r) {
+    $ten = trim((string)($r['name'] ?? ''));
+    if ($ten === '') out(['ok' => false, 'error' => 'Thợ thứ ' . ($i + 1) . ' chưa có tên.'], 400);
+    $kv = mhCleanKvName((string)($r['kv_name'] ?? ''));
+    if (!empty($r['id'])) $up->execute([$ten, $kv, !empty($r['active']) ? 1 : 0, $i + 1, (int)$r['id']]);
+    else $ins->execute([$ten, $kv, !empty($r['active']) ? 1 : 0, $i + 1, time()]);
+  }
+  $pdo->commit();
+  mhAudit($u['id'], 'barbers_save', count($rows) . ' thợ');
+  out(['ok' => true]);
 }
 
 /* ===== trao quà ===== */
@@ -581,7 +741,7 @@ case 'program_del': {
 
 case 'customers_all': {
   mhRequireOwner();
-  out(['ok' => true, 'rows' => allCustomers(), 'tiers' => mhTiers()]);
+  out(['ok' => true, 'rows' => allCustomers(), 'tiers' => mhTiers(), 'barbers' => mhBarbers()]);
 }
 
 case 'dashboard': {
@@ -615,7 +775,24 @@ case 'dashboard': {
                         GROUP BY u.id ORDER BY n DESC");
   $st->execute([$month . '-%']);
 
+  /* Theo thợ, tháng này: lượt, khách, tiền dịch vụ, và bao nhiêu khách
+     quay lại (đã từng cắt với chính thợ đó trước tháng này). */
+  $st2 = db()->prepare("SELECT b.id, b.name, COUNT(v.id) n, COUNT(DISTINCT v.customer_id) k,
+                               COALESCE(SUM(v.amount),0) s,
+                               COUNT(DISTINCT CASE WHEN EXISTS (SELECT 1 FROM visits o
+                                   WHERE o.customer_id = v.customer_id AND o.barber_id = v.barber_id
+                                     AND o.void_at IS NULL AND o.visit_date < ?) THEN v.customer_id END) cu
+                          FROM barbers b JOIN visits v ON v.barber_id = b.id
+                         WHERE v.void_at IS NULL AND v.visit_date LIKE ?
+                         GROUP BY b.id ORDER BY n DESC");
+  $st2->execute([$month . '-01', $month . '-%']);
+  $khongTho = $q("SELECT COUNT(*) n FROM visits WHERE void_at IS NULL AND barber_id IS NULL AND visit_date LIKE ?", [$month . '-%']);
+
   out(['ok' => true,
+       'barbers' => array_map(function ($r) {
+         return ['id' => (int)$r['id'], 'name' => $r['name'], 'visits' => (int)$r['n'], 'customers' => (int)$r['k'],
+                 'amount' => (int)$r['s'], 'returning' => (int)$r['cu']]; }, $st2->fetchAll()),
+       'no_barber' => (int)$khongTho['n'],
        'today' => ['visits' => (int)$hom['n'], 'amount' => (int)$hom['s']],
        'month' => ['visits' => (int)$thg['n'], 'amount' => (int)$thg['s'], 'voided' => (int)$huy['n'],
                    'new_customers' => (int)$moi['n'], 'gifts_given' => (int)$qua['n']],
@@ -654,13 +831,15 @@ case 'import': {
   $n = ['invoices' => count($inv), 'walkin' => 0, 'dup' => 0, 'linked' => 0, 'created' => 0,
         'new_customers' => 0, 'amount_created' => 0];
   $unmapped = []; $dung = []; $min = null; $max = null;
+  $thoCache = []; $thoMoi = []; $n['barber_filled'] = 0;
+  $fillTho  = $pdo->prepare('UPDATE visits SET barber_id = ? WHERE kv_invoice = ? AND barber_id IS NULL');
 
   $findDup  = $pdo->prepare('SELECT 1 FROM visits WHERE kv_invoice = ?');
   $findSame = $pdo->prepare("SELECT id FROM visits WHERE customer_id = ? AND visit_date = ? AND kv_invoice IS NULL
                                AND void_at IS NULL AND source IN ('counter','owner') ORDER BY id");
   $link     = $pdo->prepare('UPDATE visits SET kv_invoice = ?, amount = ? WHERE id = ?');
-  $insV     = $pdo->prepare("INSERT INTO visits (customer_id, visit_date, visit_time, amount, source, kv_invoice, created_at, created_by)
-                             VALUES (?,?,?,?,'import',?,?,?)");
+  $insV     = $pdo->prepare("INSERT INTO visits (customer_id, visit_date, visit_time, amount, source, kv_invoice, barber_id, created_at, created_by)
+                             VALUES (?,?,?,?,'import',?,?,?,?)");
   $insI     = $pdo->prepare('INSERT INTO visit_items (visit_id, service_id, kv_code, name, kind, qty, price) VALUES (?,?,?,?,?,?,?)');
 
   foreach ($inv as $h) {
@@ -673,8 +852,16 @@ case 'import': {
     if ($min === null || $date < $min) $min = $date;
     if ($max === null || $date > $max) $max = $date;
 
+    $bid = mhBarberFromKv((string)($h['b'] ?? ''), $thoCache, $thoMoi);
+
     $findDup->execute([$code]);
-    if ($findDup->fetchColumn()) { $n['dup']++; continue; }
+    if ($findDup->fetchColumn()) {
+      $n['dup']++;
+      /* Hoá đơn đã nhập từ trước khi app biết đọc cột thợ: nhập lại cùng
+         file là điền bù thợ cho các lượt cũ. */
+      if ($bid) { $fillTho->execute([$bid, $code]); $n['barber_filled'] += $fillTho->rowCount(); }
+      continue;
+    }
 
     $c = mhEnsureCustomer($phone, trim((string)($h['n'] ?? '')), $u['id'], trim((string)($h['k'] ?? '')));
     if ($c['_new']) $n['new_customers']++;
@@ -688,12 +875,13 @@ case 'import': {
     if ($vid) {
       $dung[$vid] = true;
       $link->execute([$code, $amount, $vid]);
+      if ($bid) $pdo->prepare('UPDATE visits SET barber_id = ? WHERE id = ? AND barber_id IS NULL')->execute([$bid, $vid]);
       mhDelFlag($vid, 'NO_INVOICE');
       $n['linked']++;
       continue;
     }
 
-    $insV->execute([$c['id'], $date, $time, $amount, $code, time(), $u['id']]);
+    $insV->execute([$c['id'], $date, $time, $amount, $code, $bid, time(), $u['id']]);
     $vid = (int)$pdo->lastInsertId();
     foreach ((array)($h['i'] ?? []) as $it) {
       $kv = mb_strtoupper(trim((string)($it[0] ?? '')));
@@ -733,7 +921,7 @@ case 'import': {
   } else {
     $pdo->rollBack();
   }
-  out(['ok' => true, 'committed' => $commit, 'stats' => $n,
+  out(['ok' => true, 'committed' => $commit, 'stats' => $n, 'barbers_new' => $thoMoi,
        'unmapped' => array_values($unmapped), 'orphans' => $orphans]);
 }
 

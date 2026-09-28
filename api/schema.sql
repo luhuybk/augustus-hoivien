@@ -58,6 +58,34 @@ CREATE TABLE IF NOT EXISTS customers (
 );
 CREATE INDEX IF NOT EXISTS idx_cus_last4 ON customers(last4);
 
+/* Số điện thoại cũ của khách — khi đổi số hoặc gộp hai khách trùng.
+   Hoá đơn KiotViet vẫn mang số cũ thì vẫn về đúng người, và quầy gõ 4 số
+   cuối của số cũ vẫn ra. */
+CREATE TABLE IF NOT EXISTS customer_aliases (
+  phone       TEXT    PRIMARY KEY,
+  last4       TEXT    NOT NULL,
+  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_alias_last4 ON customer_aliases(last4);
+CREATE INDEX IF NOT EXISTS idx_alias_cus   ON customer_aliases(customer_id);
+
+/* ---------------- thợ cắt ---------------- */
+
+/* kv_name: tên của thợ ở cột "Người bán" bên KiotViet — để nhập file thì
+   biết hoá đơn nào của ai. Tách khỏi name để chủ đổi tên hiển thị (vd.
+   "Lạc") mà vẫn khớp được với "Lâm Gia Lạc" trong file.
+   Thợ nghỉ thì tắt, KHÔNG xoá — lượt cũ vẫn trỏ vào. Sau này đặt lịch
+   cũng dựa trên bảng này. */
+CREATE TABLE IF NOT EXISTS barbers (
+  id          INTEGER PRIMARY KEY,
+  name        TEXT    NOT NULL,
+  kv_name     TEXT    NOT NULL DEFAULT '',
+  active      INTEGER NOT NULL DEFAULT 1,
+  sort        INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL
+);
+
 /* ---------------- dịch vụ ---------------- */
 
 /* kind quyết định dịch vụ này được tính vào đâu:
@@ -96,6 +124,7 @@ CREATE TABLE IF NOT EXISTS visits (
   source      TEXT    NOT NULL DEFAULT 'counter',
   kv_invoice  TEXT,                          -- mã hoá đơn KiotViet đã khớp
   flags       TEXT    NOT NULL DEFAULT '',   -- NO_INVOICE: đối soát không thấy hoá đơn
+  barber_id   INTEGER,                       -- thợ cắt lượt này (NULL = chưa ghi)
   note        TEXT    NOT NULL DEFAULT '',
   created_at  INTEGER NOT NULL,
   created_by  INTEGER,

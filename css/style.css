@@ -275,3 +275,11 @@ button.tcard:hover{background:var(--bg3)}
   .split{grid-template-columns:1fr}
   .split > .pane-l{display:none}
 }
+
+/* ---------------- thợ cắt ---------------- */
+.thoquen{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px;font-size:13px;color:var(--tx2)}
+.tq{padding:3px 10px;border-radius:99px;background:var(--bg3);color:var(--tx)}
+.tq.top{background:rgba(214,165,74,.16);color:var(--acc);font-weight:600}
+.tq i{font-style:normal;opacity:.75;font-weight:500}
+.tho{font-weight:600;color:var(--tx)}
+.vbsel{padding:6px 8px;border-radius:8px;background:var(--bg3);border:1px solid var(--line);font-size:13px;max-width:120px}

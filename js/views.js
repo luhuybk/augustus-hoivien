@@ -178,8 +178,9 @@ const Views = {
         </div>
         <div class="dim" style="margin-top:10px">${s.cuts} lần cắt · ${s.visits} lượt ghé · đã chi ${tien(s.spend)}
           ${s.last ? ' · gần nhất ' + ngay(s.last) : ''}</div>
+        ${this.thoQuen(d.barbers, s.visits)}
         ${hang}
-        ${c.note && owner ? `<p class="note" style="margin:10px 0 0">📝 ${esc(c.note)}</p>` : ''}
+        ${c.note && owner ? `<p class="note" style="margin:10px 0 0;white-space:pre-line">📝 ${esc(c.note)}</p>` : ''}
       </div>
 
       ${pending.length ? `<div class="giftbox${moi.size ? ' flash' : ''}">
@@ -199,10 +200,12 @@ const Views = {
 
       <div class="card">
         <h3>Ghi lượt ${owner ? '' : 'hôm nay'}</h3>
+        ${this.pickBarber(ui, d.last_barber_id)}
         ${this.pickServices(ui)}
         ${owner ? `<div class="field" style="margin-top:12px"><label>Ngày (chủ quán ghi bù được ngày cũ)</label>
           <input type="date" id="visitDate" value="${esc(ui.date || App.today || '')}" max="${esc(App.today || '')}"></div>` : ''}
-        <button class="btn pri" data-act="addVisit" style="margin-top:12px" ${ui.sel.size ? '' : 'disabled'}>
+        ${this.canTho(ui) ? '<p class="dim" style="margin:10px 0 0;color:var(--warn)">Chọn thợ cắt trước khi ghi.</p>' : ''}
+        <button class="btn pri" data-act="addVisit" style="margin-top:12px" ${ui.sel.size && !this.canTho(ui) ? '' : 'disabled'}>
           Ghi lượt${ui.sel.size ? ' · ' + tien(this.tongChon(ui)) : ''}</button>
       </div>
 
@@ -241,6 +244,30 @@ const Views = {
       <div class="dim">${nx}</div>`;
   },
 
+  /* "✂︎ Thợ quen: Lạc 12 lần (80%) · Phú 3" — quầy nhìn là biết khách hay
+     ngồi ghế ai, để hỏi "hôm nay anh vẫn cắt với Lạc chứ?". */
+  thoQuen(ds, tong){
+    if (!ds || !ds.length) return '';
+    const co = ds.reduce((a, b) => a + b.n, 0) || 1;
+    return `<div class="thoquen">✂︎ Thợ quen: ${ds.slice(0, 3).map((b, i) =>
+      `<span class="tq${i === 0 ? ' top' : ''}">${esc(b.name)} <b>${b.n}</b>${i === 0 && ds.length > 1 ? ` <i>${Math.round(b.n / co * 100)}%</i>` : ''}</span>`).join('')}
+      ${co < tong ? `<span class="dim"> · ${tong - co} lượt chưa ghi thợ</span>` : ''}</div>`;
+  },
+
+  /* Quầy bắt buộc chọn thợ khi quán đã khai thợ; chủ thì không bắt. */
+  canTho(ui){
+    return !API.isOwner() && (App.barbers || []).length > 0 && !ui.barber;
+  },
+
+  pickBarber(ui, lastId){
+    const ds = App.barbers || [];
+    if (!ds.length) return API.isOwner()
+      ? '<p class="dim" style="margin:0 0 10px">Chưa khai thợ cắt — thêm ở Thiết lập → Thợ cắt (hoặc nhập file KiotViet, app tự lấy từ cột "Người bán").</p>' : '';
+    return `<div class="dim" style="margin-bottom:6px">Thợ cắt</div>
+      <div class="chips" style="flex-wrap:wrap">${ds.map(b => `
+        <button class="chip${ui.barber === b.id ? ' on' : ''}" data-act="pickBarber" data-id="${b.id}">${esc(b.name)}${b.id === lastId ? ' <span style="opacity:.7">· lần trước</span>' : ''}</button>`).join('')}</div>`;
+  },
+
   tongChon(ui){
     let t = 0;
     ui.sel.forEach((gia, id) => {
@@ -272,11 +299,16 @@ const Views = {
           <span class="dim num"> ${esc(v.customer_phone || '')}</span><br>` : ''}
         <b>${esc(v.items.map(i => i.name).join(', ') || '—')}</b>
         <div class="sub num">${showCustomer ? '' : ngay(v.visit_date) + ' '}${esc(v.visit_time)} · ${tien(v.amount)}
+          ${v.barber_name ? ` · <b class="tho">✂︎ ${esc(v.barber_name)}</b>` : ''}
           ${v.by_name && v.source !== 'import' ? ' · ' + esc(v.by_name) : ''}${src ? ' · ' + src : ''}
           ${v.kv_invoice ? ' · ' + esc(v.kv_invoice) : ''}</div>
         ${huy ? `<div class="sub" style="color:var(--bad)">Đã huỷ${v.void_by_name ? ' bởi ' + esc(v.void_by_name) : ''}: ${esc(v.void_reason || '')}</div>` : ''}
       </div>
       ${(v.flags || []).includes('NO_INVOICE') && !huy ? '<span class="badge bad" title="Đối soát không thấy hoá đơn KiotViet nào cùng ngày">không có HĐ</span>' : ''}
+      ${v.can_void && (App.barbers || []).length ? `<select class="vbsel" data-vb="${v.id}" title="Đổi thợ">
+        <option value="0">— thợ —</option>
+        ${App.barbers.map(b => `<option value="${b.id}"${b.id === v.barber_id ? ' selected' : ''}>${esc(b.name)}</option>`).join('')}
+      </select>` : ''}
       ${v.can_void ? `<button class="link bad" data-act="void" data-id="${v.id}">Huỷ</button>` : ''}
     </div>`;
   },
@@ -291,6 +323,17 @@ const Views = {
         <button class="link bad" data-act="ungive" data-id="${g.id}">Hoàn</button></div>`).join('')}</div>`
         : '<div class="dim">Chưa trao quà nào.</div>'}
     </div>
+    ${d.aliases && d.aliases.length ? `<div class="card"><h3>Số điện thoại cũ</h3>
+      <p class="dim" style="margin:0 0 8px">Hoá đơn KiotViet mang các số này vẫn tính cho khách này; quầy gõ 4 số cuối số cũ vẫn ra.</p>
+      <div class="chips" style="flex-wrap:wrap">${d.aliases.map(p => `<span class="chip num">${esc(p)}
+        <button class="link bad" data-act="aliasDel" data-phone="${esc(p)}" style="padding:0 0 0 6px">×</button></span>`).join('')}</div></div>` : ''}
+    <details class="card" id="mergeBox"${App.ui.mergeOpen ? ' open' : ''}>
+      <summary>Gộp khách trùng</summary>
+      <p class="dim">Tìm khách kia (tên hoặc số). Mọi lượt ghé, quà đã trao của họ chuyển sang <b>${esc(c.name || 'khách này')}</b>,
+        số của họ thành số phụ, rồi họ bị xoá khỏi danh sách.</p>
+      <input id="mergeQ" class="inp" placeholder="Tên hoặc số điện thoại khách trùng" autocomplete="off" value="${esc(App.ui.mergeQ || '')}">
+      <div id="mergeRes" style="margin-top:10px">${this.mergeResults(App.ui.mergeRows, c.id)}</div>
+    </details>
     <details class="card">
       <summary>Sửa thông tin khách</summary>
       <form id="cusEditForm" style="margin-top:12px">
@@ -300,6 +343,16 @@ const Views = {
         <button class="btn pri" type="submit">Lưu</button>
       </form>
     </details>`;
+  },
+
+  mergeResults(rows, selfId){
+    if (!rows) return '';
+    rows = rows.filter(r => r.id !== selfId);
+    if (!rows.length) return '<div class="dim">Không có khách nào khác khớp.</div>';
+    return `<div class="list">${rows.map(r => `<div class="item"><div class="grow"><b>${esc(r.name || '(chưa có tên)')}</b>
+        <div class="sub num">${esc(r.phone)} · ${r.cuts} lần cắt${r.last ? ' · ghé ' + ngay(r.last) : ''}</div></div>
+        ${tierBadge(r.tier)}
+        <button class="btn sm" data-act="merge" data-id="${r.id}">Gộp vào đây</button></div>`).join('')}</div>`;
   },
 
   /* ---------------- trong ngày ---------------- */
@@ -318,6 +371,7 @@ const Views = {
         <div class="stat${d.gifts.length ? ' hot' : ''}"><div class="n">${d.gifts.length}</div><div class="l">quà đã trao</div></div>
         <div class="stat"><div class="n">${d.visits.length - con.length}</div><div class="l">lượt đã huỷ</div></div>
       </div>
+      ${this.dayBarbers(con)}
       ${d.gifts.length ? `<div class="card"><h3>Quà đã trao</h3><div class="list">${d.gifts.map(g => `
         <button class="item" data-act="open" data-id="${g.customer_id}"><div class="grow"><b>${esc(g.gift)}</b>
           <div class="sub">${esc(g.name)} · ${g.time}${g.by ? ' · ' + esc(g.by) : ''}</div></div></button>`).join('')}</div></div>` : ''}
@@ -326,6 +380,14 @@ const Views = {
                           : '<div class="dim">Chưa có lượt nào.</div>'}
       </div>
     </div>`;
+  },
+
+  dayBarbers(con){
+    if (!con.length || !(App.barbers || []).length && !con.some(v => v.barber_name)) return '';
+    const dem = new Map();
+    con.forEach(v => { const k = v.barber_name || '— chưa ghi thợ'; dem.set(k, (dem.get(k) || 0) + 1); });
+    return `<div class="chips" style="flex-wrap:wrap">${[...dem].sort((a, b) => b[1] - a[1]).map(([k, n]) =>
+      `<span class="chip${k[0] === '—' ? '' : ' on'}">✂︎ ${esc(k)} · ${n}</span>`).join('')}</div>`;
   },
 
   /* ---------------- khác / thiết lập ---------------- */
@@ -344,6 +406,7 @@ const Views = {
         ${muc('go:tiers', '🏅', 'Hạng thành viên', 'Ngưỡng lên hạng và quyền lợi')}
         ${muc('go:services', '✂︎', 'Dịch vụ', 'Giá, loại, mã hàng KiotViet')}
         ${muc('go:import', '📥', 'Nhập & đối soát KiotViet', 'Nạp lịch sử, tìm lượt quầy quên ghi hoặc ghi khống')}
+        ${muc('go:barbers', '💈', 'Thợ cắt', 'Danh sách thợ, khách quen của từng thợ')}
         ${muc('go:users', '👤', 'Tài khoản quầy', 'Tạo, đổi mật khẩu, tắt')}
         ${muc('go:audit', '📜', 'Nhật ký', 'Ai đã ghi, huỷ, trao quà lúc nào')}
         ${muc('go:password', '🔑', 'Đổi mật khẩu chủ')}
@@ -375,6 +438,15 @@ const Views = {
             <div class="c">${t.count}</div></div>`).join('')}
           <div class="dim">${d.customers} khách trong danh sách · ${d.month.new_customers} khách mới tháng này</div>
         </div>
+        ${d.barbers.length || d.no_barber ? `<div class="card"><h3>Thợ cắt tháng này</h3>
+          ${d.barbers.length ? `<div class="tblwrap" style="border:0"><table class="tbl" style="font-size:13.5px">
+            <thead><tr><th>Thợ</th><th class="r">Lượt</th><th class="r">Khách</th><th class="r" title="Khách đã từng cắt với chính thợ này trước tháng này">Quay lại</th><th class="r">Tiền DV</th></tr></thead>
+            <tbody>${d.barbers.map(b => `<tr style="cursor:default"><td><b>${esc(b.name)}</b></td><td class="r num">${b.visits}</td>
+              <td class="r num">${b.customers}</td>
+              <td class="r num">${b.returning} <span class="dim">(${b.customers ? Math.round(b.returning / b.customers * 100) : 0}%)</span></td>
+              <td class="r num">${tienGon(b.amount)}</td></tr>`).join('')}</tbody></table></div>` : ''}
+          ${d.no_barber ? `<div class="dim" style="margin-top:6px;color:var(--warn)">${d.no_barber} lượt tháng này chưa ghi thợ.</div>` : ''}
+        </div>` : ''}
         <div class="card"><h3>Quầy ghi tháng này</h3>
           ${d.by_user.length ? d.by_user.map(u => `<div class="row" style="padding:4px 0"><span class="grow">${esc(u.name)}</span>
             <b class="num">${u.n}</b></div>`).join('') : '<div class="dim">Chưa có lượt nào.</div>'}
@@ -415,6 +487,10 @@ const Views = {
       name:  (a, b) => a.name.localeCompare(b.name, 'vi'),
     }[st.sort || 'last'];
     rows.sort(so);
+    if (st.barber) rows = rows.filter(c => c.barber_id === st.barber);
+    const thoById = {};
+    (App.data.barbersAll || []).forEach(b => thoById[b.id] = b);
+    const tenTho = c => c.barber_id && thoById[c.barber_id] ? thoById[c.barber_id].name : '';
     const tierById = {}, dem = {};
     tiers.forEach(t => { tierById[t.id] = t; dem[t.id] = 0; });
     all.forEach(c => { if (c.visits && dem[c.tier_id] != null) dem[c.tier_id]++; });
@@ -423,12 +499,13 @@ const Views = {
     const cur = App.cur.name === 'card' ? App.cur.id : 0;
 
     const bang = `<div class="tblwrap"><table class="tbl">
-      <thead><tr><th>Khách</th><th>Điện thoại</th><th>Hạng</th><th class="r">Lần cắt</th>
+      <thead><tr><th>Khách</th><th>Điện thoại</th><th>Hạng</th><th>Thợ quen</th><th class="r">Lần cắt</th>
         <th class="r">Đã chi</th><th>Ghé gần nhất</th><th>Quà chờ</th></tr></thead>
       <tbody>${hien.map(c => `<tr data-act="open" data-id="${c.id}">
         <td><b>${esc(c.name || '(chưa có tên)')}</b>${c.flagged ? ' <span class="badge bad">⚠︎</span>' : ''}</td>
         <td class="num">${esc(c.phone)}</td>
         <td>${tierBadge(tierById[c.tier_id])}</td>
+        <td>${esc(tenTho(c))}</td>
         <td class="r num">${c.cuts}</td>
         <td class="r num">${tien(c.spend)}</td>
         <td class="num">${c.last ? ngay(c.last) : '—'}</td>
@@ -437,7 +514,7 @@ const Views = {
 
     const danhSach = `<div class="list">${hien.map(c => `
         <button class="item${cur === c.id ? ' sel' : ''}" data-act="open" data-id="${c.id}"><div class="grow"><b>${esc(c.name || '(chưa có tên)')}</b>
-          <div class="sub num">${esc(c.phone)} · ${c.cuts} lần cắt · ${tienGon(c.spend)}${c.last ? ' · ' + ngay(c.last) : ''}</div></div>
+          <div class="sub num">${esc(c.phone)} · ${c.cuts} lần cắt · ${tienGon(c.spend)}${c.last ? ' · ' + ngay(c.last) : ''}${tenTho(c) ? ' · ✂︎ ' + esc(tenTho(c)) : ''}</div></div>
           ${c.flagged ? '<span class="badge bad">⚠︎</span>' : ''}
           ${c.pending.length ? `<span class="badge gift">🎁 ${c.pending.length}</span>` : ''}
           ${tierBadge(tierById[c.tier_id])}</button>`).join('')}</div>`;
@@ -460,6 +537,10 @@ const Views = {
         ${[['last', 'Ghé gần đây'], ['cuts', 'Cắt nhiều nhất'], ['spend', 'Chi nhiều nhất'], ['name', 'Tên A–Z']].map(([k, n]) =>
           `<button class="chip${(st.sort || 'last') === k ? ' on' : ''}" data-act="cs" data-k="${k}">${n}</button>`).join('')}
       </div>
+      ${(App.data.barbersAll || []).length ? `<div class="chips">
+        <button class="chip${!st.barber ? ' on' : ''}" data-act="cb" data-id="0">✂︎ Mọi thợ</button>
+        ${App.data.barbersAll.map(b => `<button class="chip${st.barber === b.id ? ' on' : ''}" data-act="cb" data-id="${b.id}">${esc(b.name)}${b.active ? '' : ' (nghỉ)'}</button>`).join('')}
+      </div>` : ''}
       ${hien.length ? (opt.table ? bang : danhSach) : '<div class="empty">Không có khách nào khớp.</div>'}
       ${rows.length > hien.length ? `<button class="btn" data-act="more" style="margin-top:12px">Hiện thêm (${rows.length - hien.length})</button>` : ''}
     </div>`;
@@ -601,6 +682,9 @@ const Views = {
           <div class="stat"><div class="n">${s.dup}</div><div class="l">đã nhập trước đó</div></div>
         </div>
         <div class="dim">${s.walkin} hoá đơn khách lẻ (không số điện thoại) được bỏ qua.</div>
+        ${r.barbers_new && r.barbers_new.length ? `<p class="note" style="margin-top:10px">Thợ lấy từ cột “Người bán”, ${r.committed ? 'đã' : 'sẽ'} thêm vào danh sách thợ:
+          <b>${r.barbers_new.map(esc).join(', ')}</b>. Đổi tên hiển thị ở Thiết lập → Thợ cắt.</p>` : ''}
+        ${s.barber_filled ? `<div class="dim">${s.barber_filled} lượt đã nhập từ trước ${r.committed ? 'đã' : 'sẽ'} được điền thợ.</div>` : ''}
         ${r.unmapped.length ? `<p class="note" style="margin-top:10px">Mã hàng chưa gắn vào dịch vụ nào (sẽ tính là “Khác”, không vào số lần cắt):
           ${r.unmapped.map(u => `<b>${esc(u.code)}</b> ${esc(u.name)} (${u.count})`).join(' · ')}.
           Thêm mã vào mục Dịch vụ rồi nhập lại cũng được — không sợ trùng.</p>` : ''}
@@ -609,6 +693,31 @@ const Views = {
           <p class="dim">${r.committed ? 'Đã gắn cờ — xem ở Tổng quan.' : 'Áp dụng thì các lượt này sẽ bị gắn cờ để bạn xem lại.'}</p>` : ''}
         ${r.committed ? '' : `<button class="btn pri" data-act="importGo" style="margin-top:12px">Áp dụng</button>`}
       </div>` : ''}
+    </div>`;
+  },
+
+  /* ---------------- thợ cắt ---------------- */
+
+  barbers(rows){
+    return `<div class="wrap">
+      ${head('Thợ cắt', true)}
+      <p class="note">Quầy chọn thợ mỗi lần ghi lượt. <b>Tên bên KiotViet</b> là tên ở cột “Người bán” trong file hoá đơn —
+        để nhập file thì biết lượt nào của ai. Thợ nghỉ thì bỏ tick, đừng xoá: lịch sử khách quen vẫn giữ.
+        <br><b>Khách quen</b> = khách có từ 3 lượt, và thợ này là người cắt cho họ nhiều nhất.</p>
+      ${rows.map((b, i) => `<div class="erow${b.active ? '' : ' void'}">
+        ${b.id ? `<div class="row"><b class="grow">${esc(b.name)}</b>
+          <span class="dim num">${b.visits} lượt · ${b.customers} khách · <b style="color:var(--acc)">${b.loyal} khách quen</b>${b.last ? ' · gần nhất ' + ngay(b.last) : ''}</span></div>` : '<b>Thợ mới</b>'}
+        <div class="grid2">
+          <div><label>Tên hiển thị</label><input data-bb="${i}" data-f="name" value="${esc(b.name)}"></div>
+          <div><label>Tên bên KiotViet (cột Người bán)</label><input data-bb="${i}" data-f="kv_name" value="${esc(b.kv_name)}"></div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label class="check grow"><input type="checkbox" data-bb="${i}" data-f="active"${b.active ? ' checked' : ''}> Đang làm (hiện ở quầy)</label>
+          ${b.id ? `<button class="link" data-act="thoKhach" data-id="${b.id}">Xem khách quen ›</button>` : ''}
+        </div>
+      </div>`).join('')}
+      <button class="btn" data-act="barberAdd" style="margin-bottom:10px">+ Thêm thợ</button>
+      <button class="btn pri" data-act="saveBarbers">Lưu</button>
     </div>`;
   },
 
