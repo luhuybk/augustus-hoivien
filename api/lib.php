@@ -37,8 +37,16 @@ require $cfg;
 
 if (!defined('MH_OWNER_USER') || MH_OWNER_USER === '')
   mhFail('Chưa đặt MH_OWNER_USER trong config.php.', 503);
-if (!defined('MH_OWNER_PASS') || MH_OWNER_PASS === '' || str_contains(MH_OWNER_PASS, 'DAN_MA_VAO_DAY'))
+if (!defined('MH_OWNER_PASS') || MH_OWNER_PASS === '')
   mhFail('Chưa đặt mật khẩu chủ trong config.php. Chạy "node tools/hash-password.js" để tạo mã rồi dán vào.', 503);
+/* Kiểm đúng DẠNG mã, không chỉ dò chữ mẫu. Trước đây chỉ chặn đúng chữ
+   "DAN_MA_VAO_DAY", nên dòng mẫu có dấu, mật khẩu thật dán thẳng vào, hay
+   mã bị PHP nuốt mất đoạn "$abc" vì để trong nháy kép… đều lọt qua — tài
+   khoản chủ được tạo với mã hỏng và gõ mật khẩu nào cũng "Sai mật khẩu". */
+if (!preg_match('~^pbkdf2_sha256\$\d+\$[A-Za-z0-9+/]+=*\$[A-Za-z0-9+/]+=*$~', MH_OWNER_PASS))
+  mhFail('Dòng MH_OWNER_PASS trong config.php chưa đúng. Nó phải là mã dài bắt đầu bằng "pbkdf2_sha256$210000$…" '
+       . '(không phải mật khẩu thật), đặt trong dấu nháy ĐƠN: define(\'MH_OWNER_PASS\', \'pbkdf2_sha256$…\'); '
+       . '— chạy "node tools/hash-password.js" rồi chép nguyên dòng nó in ra.', 503);
 
 if (!defined('MH_TZ'))           define('MH_TZ', 'Asia/Ho_Chi_Minh');
 if (!defined('MH_SHOP_NAME'))    define('MH_SHOP_NAME', 'Barbershop');
@@ -106,7 +114,10 @@ function mhMigrate(PDO $pdo): void {
   mhAddColumn($pdo, 'visits', 'barber_id', 'INTEGER');
   $pdo->exec('CREATE INDEX IF NOT EXISTS idx_visit_barber ON visits(barber_id, visit_date)');
 
-  if ((int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn() > 0) return;
+  if ((int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn() > 0) {
+    mhSyncOwnerFromConfig($pdo);
+    return;
+  }
 
   /* Lần đầu chạy: dựng sẵn tài khoản chủ, dịch vụ theo đúng mã hàng trong
      file KiotViet của quán, bốn hạng và hai chương trình — mở app lên là
@@ -114,6 +125,8 @@ function mhMigrate(PDO $pdo): void {
   $now = time();
   $pdo->prepare('INSERT INTO users (name, username, pass_hash, role, created_at) VALUES (?,?,?,?,?)')
       ->execute(['Chủ quán', mb_strtolower(MH_OWNER_USER), MH_OWNER_PASS, 'owner', $now]);
+  $pdo->prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('owner_pass_config', ?)")
+      ->execute([hash('sha256', MH_OWNER_PASS . '|' . mb_strtolower(MH_OWNER_USER))]);
 
   $sv = $pdo->prepare('INSERT INTO services (name, kind, price, kv_codes, sort) VALUES (?,?,?,?,?)');
   $i = 0;
@@ -154,6 +167,35 @@ function mhMigrate(PDO $pdo): void {
   $p->execute(['Uốn tặng tinh dầu', 'perm', json_encode([
       ['at' => 1, 'gift' => 'Tinh dầu dưỡng tóc'],
     ], JSON_UNESCAPED_UNICODE), 1, mhToday(), 2, $now]);
+}
+
+/* config.php là chỗ quyết định mật khẩu chủ: sửa dòng MH_OWNER_PASS (hoặc
+   MH_OWNER_USER) là lần mở trang kế tiếp tài khoản chủ đổi theo. Trước đây
+   mã chỉ được đọc ĐÚNG MỘT LẦN lúc tạo tài khoản — lỡ lần đầu mã hỏng thì
+   sửa config bao nhiêu cũng vô ích, chủ bị khoá ngoài app vĩnh viễn.
+
+   Đổi mật khẩu trong app vẫn giữ được: chỉ khi dòng trong config KHÁC lần
+   áp gần nhất (so bằng mã băm lưu ở settings) mới ghi đè. Ai sửa được
+   config.php thì đã có quyền cả máy chủ, nên đây không mở thêm cửa nào. */
+function mhSyncOwnerFromConfig(PDO $pdo): void {
+  $dau = hash('sha256', MH_OWNER_PASS . '|' . mb_strtolower(MH_OWNER_USER));
+  $st = $pdo->query("SELECT value FROM settings WHERE key = 'owner_pass_config'");
+  if ($st->fetchColumn() === $dau) return;
+  $id = $pdo->query("SELECT id FROM users WHERE role = 'owner' ORDER BY id LIMIT 1")->fetchColumn();
+  if (!$id) return;
+  $ten = mb_strtolower(MH_OWNER_USER);
+  /* Tên đăng nhập mới trùng một tài khoản quầy thì giữ tên cũ, chỉ đổi mật khẩu. */
+  $trung = $pdo->prepare('SELECT 1 FROM users WHERE username = ? AND id <> ?');
+  $trung->execute([$ten, $id]);
+  if ($trung->fetchColumn())
+    $pdo->prepare('UPDATE users SET pass_hash = ?, active = 1 WHERE id = ?')->execute([MH_OWNER_PASS, $id]);
+  else
+    $pdo->prepare('UPDATE users SET pass_hash = ?, username = ?, active = 1 WHERE id = ?')->execute([MH_OWNER_PASS, $ten, $id]);
+  $pdo->prepare('DELETE FROM sessions WHERE user_id = ?')->execute([$id]);
+  $pdo->exec('DELETE FROM login_attempts');       // gỡ luôn khoá 5 phút vì gõ sai nhiều lần
+  $pdo->prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('owner_pass_config', ?)")->execute([$dau]);
+  $pdo->prepare('INSERT INTO audit_log (user_id, action, detail, ip, created_at) VALUES (?,?,?,?,?)')
+      ->execute([$id, 'owner_reset', 'Mật khẩu chủ đặt lại từ config.php', (string)($_SERVER['REMOTE_ADDR'] ?? ''), time()]);
 }
 
 function mhAddColumn(PDO $pdo, string $bang, string $cot, string $kieu): void {
