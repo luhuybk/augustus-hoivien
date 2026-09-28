@@ -112,6 +112,17 @@ function mhMigrate(PDO $pdo): void {
      chạy bản cũ phải tự vá. Chỉ mục trên cột mới cũng phải đặt SAU khi vá,
      không thì schema.sql chạy trên CSDL cũ báo "no such column". */
   mhAddColumn($pdo, 'visits', 'barber_id', 'INTEGER');
+  mhAddColumn($pdo, 'customers', 'birthday', "TEXT NOT NULL DEFAULT ''");
+  mhAddColumn($pdo, 'customers', 'birth_year', 'INTEGER');
+  /* Máy đang chạy: lần đầu có cột quà sinh nhật thì bật sẵn cho Vàng và
+     Đen — đúng như chủ quán yêu cầu; hạng khác chủ tự bật trong Thiết lập. */
+  if (mhAddColumn($pdo, 'tiers', 'bday_gift', "TEXT NOT NULL DEFAULT ''"))
+  {
+    $pdo->exec("UPDATE tiers SET bday_gift = 'Quà sinh nhật' WHERE name IN ('Vàng', 'Đen')");
+    /* Bản trước ghi "Quà sinh nhật" như một dòng đặc quyền của hạng Đen —
+       giờ nó là mục riêng, bỏ dòng cũ đi cho khỏi hiện hai lần. */
+    $pdo->exec("UPDATE tiers SET perks = TRIM(REPLACE(perks, char(10) || 'Quà sinh nhật', ''))");
+  }
   $pdo->exec('CREATE INDEX IF NOT EXISTS idx_visit_barber ON visits(barber_id, visit_date)');
 
   if ((int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn() > 0) {
@@ -149,13 +160,14 @@ function mhMigrate(PDO $pdo): void {
     ['Sản phẩm',                 'product',      0, 'SP000084,SP000085,SP000089'],
   ] as $s) $sv->execute([$s[0], $s[1], $s[2], $s[3], ++$i]);
 
-  $t = $pdo->prepare('INSERT INTO tiers (name, color, min_cuts, min_spend, perks, sort) VALUES (?,?,?,?,?,?)');
+  $t = $pdo->prepare("INSERT INTO tiers (name, color, min_cuts, min_spend, perks, sort, bday_gift)
+                      VALUES (?,?,?,?,?,?, CASE WHEN ? IN ('Vàng','Đen') THEN 'Quà sinh nhật' ELSE '' END)");
   /* Đặc quyền chỉ là gợi ý để quầy có cái mà nói với khách — chủ sửa ở
      Thiết lập → Hạng. Mỗi dòng một điều. */
-  $t->execute(['Đồng', '#b87333', 0,  0,       "Tích lượt nhận quà mốc 3 – 7 – 10\nTặng tinh dầu mỗi lần uốn", 1]);
-  $t->execute(['Bạc',  '#aab4c3', 5,  1000000, "Giảm 5% sản phẩm", 2]);
-  $t->execute(['Vàng', '#e2b33c', 10, 2000000, "Giảm 10% sản phẩm\nƯu tiên đặt lịch giờ cao điểm", 3]);
-  $t->execute(['Đen',  '#1b1b1f', 15, 3500000, "Giảm 12% sản phẩm\nƯu tiên đặt lịch giờ cao điểm\nQuà sinh nhật", 4]);
+  $t->execute(['Đồng', '#b87333', 0,  0,       "Tích lượt nhận quà mốc 3 – 7 – 10\nTặng tinh dầu mỗi lần uốn", 1, 'Đồng']);
+  $t->execute(['Bạc',  '#aab4c3', 5,  1000000, "Giảm 5% sản phẩm", 2, 'Bạc']);
+  $t->execute(['Vàng', '#e2b33c', 10, 2000000, "Giảm 10% sản phẩm\nƯu tiên đặt lịch giờ cao điểm", 3, 'Vàng']);
+  $t->execute(['Đen',  '#1b1b1f', 15, 3500000, "Giảm 12% sản phẩm\nƯu tiên đặt lịch giờ cao điểm", 4, 'Đen']);
 
   $p = $pdo->prepare('INSERT INTO programs (name, kind, steps, repeat, start_date, sort, created_at)
                       VALUES (?,?,?,?,?,?,?)');
@@ -198,9 +210,11 @@ function mhSyncOwnerFromConfig(PDO $pdo): void {
       ->execute([$id, 'owner_reset', 'Mật khẩu chủ đặt lại từ config.php', (string)($_SERVER['REMOTE_ADDR'] ?? ''), time()]);
 }
 
-function mhAddColumn(PDO $pdo, string $bang, string $cot, string $kieu): void {
-  foreach ($pdo->query("PRAGMA table_info($bang)")->fetchAll() as $c) if ($c['name'] === $cot) return;
+/* Trả về true nếu vừa thêm cột (để bên gọi điền giá trị ban đầu). */
+function mhAddColumn(PDO $pdo, string $bang, string $cot, string $kieu): bool {
+  foreach ($pdo->query("PRAGMA table_info($bang)")->fetchAll() as $c) if ($c['name'] === $cot) return false;
   $pdo->exec("ALTER TABLE $bang ADD COLUMN $cot $kieu");
+  return true;
 }
 
 /* ---------------- tiện ích ---------------- */
@@ -388,7 +402,48 @@ function mhTierOf(int $cuts, int $spend, array $tiers): array {
 
 function mhTierPublic(array $t): array {
   return ['id' => $t['id'], 'name' => $t['name'], 'color' => $t['color'], 'perks' => $t['perks'],
-          'min_cuts' => $t['min_cuts'], 'min_spend' => $t['min_spend']];
+          'min_cuts' => $t['min_cuts'], 'min_spend' => $t['min_spend'], 'bday_gift' => $t['bday_gift'] ?? ''];
+}
+
+/* ============================================================
+   Sinh nhật
+   ============================================================ */
+
+/* Ngày/tháng/năm gửi lên → ['MM-DD', năm|null]. Ngày 0 = xoá ngày sinh.
+   Kiểm bằng năm nhuận 2000 để 29/02 vẫn hợp lệ khi khách không nói năm. */
+function mhParseBday($d, $m, $y): ?array {
+  $d = (int)$d; $m = (int)$m; $y = (int)$y;
+  if ($d === 0 && $m === 0) return ['', null];
+  if ($y && ($y < 1920 || $y > (int)date('Y'))) mhFail('Năm sinh không hợp lệ.', 400);
+  if (!checkdate($m, $d, $y ?: 2000)) mhFail('Ngày sinh không hợp lệ.', 400);
+  return [sprintf('%02d-%02d', $m, $d), $y ?: null];
+}
+
+/* Các khách đã nhận quà sinh nhật NĂM NAY: [customer_id => true]. */
+function mhBdayGivenThisYear(): array {
+  $st = db()->prepare('SELECT customer_id FROM birthday_given WHERE year = ?');
+  $st->execute([(int)date('Y')]);
+  return array_fill_keys(array_map('intval', $st->fetchAll(PDO::FETCH_COLUMN)), true);
+}
+
+/* Trạng thái sinh nhật của một khách theo hạng hiện tại.
+   Quà trao trong cả THÁNG sinh nhật — dễ nói với khách ("tháng sinh nhật
+   anh ghé là có quà"), và khách không phải canh đúng ngày mới đến. */
+function mhBdayState(array $c, ?array $tier, bool $daNhan): array {
+  $gift = $tier ? trim((string)($tier['bday_gift'] ?? '')) : '';
+  $bd = (string)($c['birthday'] ?? '');
+  $ra = ['birthday' => $bd, 'year' => $c['birth_year'] !== null ? (int)$c['birth_year'] : null,
+         'eligible' => $gift !== '', 'gift' => $gift, 'this_month' => false, 'given' => $daNhan,
+         'pending' => false, 'days' => null];
+  if ($bd === '') return $ra;
+  $ra['this_month'] = substr($bd, 0, 2) === date('m');
+  $ra['pending'] = $ra['eligible'] && $ra['this_month'] && !$daNhan;
+  /* Còn bao nhiêu ngày tới sinh nhật (0 = hôm nay). 29/02 năm thường tính 01/03. */
+  $nam = (int)date('Y');
+  $t = strtotime("$nam-$bd") ?: strtotime("$nam-03-01");
+  if ($t < strtotime('today')) $t = strtotime(($nam + 1) . "-$bd") ?: strtotime(($nam + 1) . '-03-01');
+  $ra['days'] = (int)round(($t - strtotime('today')) / 86400);
+  return $ra;
 }
 
 /* Số lượt cắt, tổng chi, lượt gần nhất — của một khách, hoặc của tất cả

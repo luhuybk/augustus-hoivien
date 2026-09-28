@@ -349,6 +349,34 @@ const App = {
           this.drawCard();
           return this.refreshLeft();
         }
+        case 'saveBday': {
+          const box = $('#bdBox'), v = k => box.querySelector(`[data-bd="${k}"]`).value;
+          if (!Number(v('day')) || !Number(v('month'))) return toast('Chọn ngày và tháng sinh.', 'bad');
+          el.disabled = true;
+          this.data.card = await API.call('customer_birthday', {id: this.data.card.customer.id,
+                                                              day: v('day'), month: v('month'), year: v('year')});
+          toast('Đã lưu ngày sinh', 'ok');
+          this.drawCard();
+          return this.refreshLeft();
+        }
+        case 'giveBday': {
+          if (!this.hoiLai(el, 'Chắc chưa?')) return;
+          el.disabled = true;
+          this.data.card = await API.call('birthday_give', {customer_id: this.data.card.customer.id});
+          toast('Đã ghi nhận trao quà sinh nhật', 'ok');
+          this.drawCard();
+          return this.refreshLeft();
+        }
+        case 'ungiveBday': {
+          if (!this.hoiLai(el, 'Hoàn thật?')) return;
+          this.data.card = await API.call('birthday_ungive', {customer_id: this.data.card.customer.id,
+                                                            year: Number(el.dataset.year)});
+          toast('Đã hoàn quà sinh nhật', 'ok');
+          return this.drawCard();
+        }
+        case 'goNoBday':
+          Object.assign(this.cus, {only: 'nobday', tier: null, barber: null, q: '', sort: 'last', limit: 100});
+          return this.go('customers');
         case 'aliasDel': {
           if (!this.hoiLai(el, 'Bỏ?')) return;
           this.data.card = await API.call('alias_del', {phone: el.dataset.phone});

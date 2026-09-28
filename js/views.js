@@ -48,6 +48,25 @@ const tierCond = t => {
   return dk.length ? 'Từ ' + dk.join(' hoặc ') : 'Hạng khởi điểm';
 };
 
+/* 'MM-DD' → '12/10' */
+const ngaySinh = bd => bd ? bd.slice(3, 5) + '/' + bd.slice(0, 2) : '';
+
+/* Ba ô chọn ngày / tháng / năm sinh. Năm để trống được — nhiều khách
+   ngại nói tuổi, mà tặng quà thì chỉ cần ngày và tháng. */
+function oNgaySinh(bd, nam, ten){
+  ten = ten || '';
+  const d = bd ? Number(bd.slice(3, 5)) : 0, m = bd ? Number(bd.slice(0, 2)) : 0;
+  const opt = (n, cur, nhan) => `<option value="${n}"${n === cur ? ' selected' : ''}>${nhan}</option>`;
+  let ngay = opt(0, d, 'Ngày'), thang = opt(0, m, 'Tháng');
+  for (let i = 1; i <= 31; i++) ngay += opt(i, d, i);
+  for (let i = 1; i <= 12; i++) thang += opt(i, m, 'Tháng ' + i);
+  return `<div class="grid3 bdrow">
+    <select class="inp" name="${ten}day" data-bd="day">${ngay}</select>
+    <select class="inp" name="${ten}month" data-bd="month">${thang}</select>
+    <input class="inp" name="${ten}year" data-bd="year" inputmode="numeric" maxlength="4" placeholder="Năm (không bắt buộc)" value="${nam || ''}">
+  </div>`;
+}
+
 const perkList = (ds, cls) => ds.length
   ? `<ul class="perks${cls ? ' ' + cls : ''}">${ds.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : '';
 
@@ -62,7 +81,8 @@ function tierPanel(tiers, counts, active, clickable){
       <div class="row">${tierBadge(t, true)}<span class="grow"></span>
         ${counts && counts[t.id] != null ? `<b class="num">${counts[t.id]}</b><span class="dim">khách</span>` : ''}</div>
       <div class="dim" style="margin:6px 0 2px">${tierCond(t)}</div>
-      ${ds.length ? perkList(ds) : '<div class="dim" style="font-style:italic">Chưa ghi đặc quyền</div>'}
+      ${ds.length || t.bday_gift ? perkList(t.bday_gift ? ds.concat('🎂 ' + t.bday_gift + ' (trong tháng sinh nhật)') : ds)
+                                 : '<div class="dim" style="font-style:italic">Chưa ghi đặc quyền</div>'}
     </${tag}>`;
   }).join('')}</div>`;
 }
@@ -157,8 +177,10 @@ const Views = {
 
     /* Đặc quyền hạng hiện tại, và hạng kế tiếp có THÊM gì — để quầy nói
        được với khách "cắt thêm 2 lần nữa là anh được giảm 10%". */
-    const dqNay = perksOf(t);
-    const dqSau = nx ? perksOf(nx.tier).filter(x => !dqNay.includes(x)) : [];
+    const dqNay = perksOf(t).concat(t && t.bday_gift ? ['🎂 ' + t.bday_gift + ' (trong tháng sinh nhật)'] : []);
+    const dqSau = nx ? perksOf(nx.tier).concat(nx.tier.bday_gift ? ['🎂 ' + nx.tier.bday_gift + ' (trong tháng sinh nhật)'] : [])
+                         .filter(x => !dqNay.includes(x)) : [];
+    const bd = d.bday || {};
     const dacQuyen = `<div class="card">
         <h3>Đặc quyền ${t ? 'hạng ' + esc(t.name) : ''}</h3>
         ${dqNay.length ? perkList(dqNay) : '<div class="dim">Hạng này chưa có đặc quyền nào.</div>'}
@@ -174,7 +196,8 @@ const Views = {
           <div class="ava" style="${tierStyle(mau)}">${esc((c.name || '?').trim().slice(0, 1).toUpperCase())}</div>
           <div class="grow">
             <div class="nm">${esc(c.name || '(chưa có tên)')}</div>
-            <div class="dim num">${esc(c.phone)}${c.kv_code ? ' · ' + esc(c.kv_code) : ''}</div>
+            <div class="dim num">${esc(c.phone)}${c.kv_code ? ' · ' + esc(c.kv_code) : ''}
+              ${bd.birthday ? ` · <span class="${bd.this_month ? 'sn-nay' : ''}">🎂 ${ngaySinh(bd.birthday)}${bd.year ? '/' + bd.year : ''}${bd.days === 0 ? ' — hôm nay!' : bd.days <= 7 ? ' — còn ' + bd.days + ' ngày' : ''}</span>` : ''}</div>
           </div>
           ${tierBadge(t, true)}
         </div>
@@ -185,8 +208,20 @@ const Views = {
         ${c.note && owner ? `<p class="note" style="margin:10px 0 0;white-space:pre-line">📝 ${esc(c.note)}</p>` : ''}
       </div>
 
-      ${pending.length ? `<div class="giftbox${moi.size ? ' flash' : ''}">
-        <h3>🎁 Quà chờ trao (${pending.length})</h3>
+      ${bd.eligible && !bd.birthday ? `<div class="card bdask" id="bdBox">
+        <h3>🎂 Hỏi ngày sinh của khách</h3>
+        <p class="dim" style="margin:0 0 10px">Hạng ${esc(t ? t.name : '')} có quà sinh nhật (${esc(bd.gift)}) — trao trong tháng sinh nhật.</p>
+        ${oNgaySinh('', null)}
+        <button class="btn pri" data-act="saveBday" style="margin-top:10px">Lưu ngày sinh</button>
+      </div>` : ''}
+
+      ${pending.length || bd.pending ? `<div class="giftbox${moi.size ? ' flash' : ''}">
+        <h3>🎁 Quà chờ trao (${pending.length + (bd.pending ? 1 : 0)})</h3>
+        ${bd.pending ? `<div class="item">
+          <div class="grow"><b>🎂 ${esc(bd.gift)}</b>
+            <div class="sub">Sinh nhật ${ngaySinh(bd.birthday)} — trao trong tháng ${Number(bd.birthday.slice(0, 2))}</div></div>
+          <button class="btn sm pri" data-act="giveBday">Đã trao</button>
+        </div>` : ''}
         ${pending.map(e => `<div class="item">
           <div class="grow"><b>${esc(e.gift)}</b>
             <div class="sub">${esc(e.pname)} · đạt ở lượt thứ ${e.total}${moi.has(e.pid + '|' + e.seq) ? ' · <b style="color:var(--gift)">vừa đạt</b>' : ''}</div></div>
@@ -316,8 +351,12 @@ const Views = {
   },
 
   cardOwner(d){
-    const c = d.customer;
-    return `<div class="card">
+    const c = d.customer, bd = d.bday || {};
+    return `${d.bday_given && d.bday_given.length ? `<div class="card"><h3>🎂 Quà sinh nhật đã trao</h3><div class="list">${d.bday_given.map(g => `
+      <div class="item"><div class="grow"><b>${esc(g.gift)}</b> <span class="dim">· năm ${g.year}</span>
+        <div class="sub">${new Date(g.given_at * 1000).toLocaleString('vi-VN')}${g.by ? ' · ' + esc(g.by) : ''}</div></div>
+        <button class="link bad" data-act="ungiveBday" data-year="${g.year}">Hoàn</button></div>`).join('')}</div></div>` : ''}
+    <div class="card">
       <h3>Quà đã trao</h3>
       ${d.given && d.given.length ? `<div class="list">${d.given.map(g => `<div class="item">
         <div class="grow"><b>${esc(g.gift)}</b>
@@ -341,6 +380,7 @@ const Views = {
       <form id="cusEditForm" style="margin-top:12px">
         <div class="field"><label>Tên</label><input name="name" value="${esc(c.name)}"></div>
         <div class="field"><label>Số điện thoại</label><input name="phone" inputmode="tel" value="${esc(c.phone)}"></div>
+        <div class="field"><label>Ngày sinh</label>${oNgaySinh(bd.birthday, bd.year, 'bd_')}</div>
         <div class="field"><label>Ghi chú (chỉ chủ quán thấy)</label><textarea name="note">${esc(c.note)}</textarea></div>
         <button class="btn pri" type="submit">Lưu</button>
       </form>
@@ -460,6 +500,16 @@ const Views = {
         <p class="note">Khách có lượt trong app nhưng hôm đó KiotViet không có hoá đơn nào gắn số của khách.
           Có thể thu ngân quên gắn khách vào hoá đơn — hoặc là lượt ghi khống. Xem rồi huỷ nếu sai.</p>
         <div class="list">${d.flagged.map(v => this.visitRow(Object.assign({}, v, {can_void: false}), true)).join('')}</div></div>` : ''}
+      ${d.birthdays.length || d.bday_missing ? `<div class="card"><h3>🎂 Sinh nhật tháng ${Number(App.today.slice(5, 7))} (${d.birthdays.length})</h3>
+        ${d.birthdays.length ? `<div class="list">${d.birthdays.map(b => `
+          <button class="item" data-act="open" data-id="${b.id}"><div class="grow"><b>${esc(b.name)}</b>
+            <div class="sub num">🎂 ${ngaySinh(b.birthday)} · ${esc(b.phone)}</div></div>
+            ${tierBadge(b.tier)}
+            ${b.given ? '<span class="badge" style="color:var(--ok)">đã trao</span>' : '<span class="badge gift">chưa trao</span>'}</button>`).join('')}</div>`
+          : '<div class="dim">Tháng này không có khách nào sinh nhật.</div>'}
+        ${d.bday_missing ? `<p class="dim" style="margin:10px 0 0">${d.bday_missing} khách thuộc hạng có quà sinh nhật chưa có ngày sinh —
+          <button class="link" data-act="goNoBday" style="padding:0">xem danh sách</button>. Quầy sẽ được nhắc hỏi khi khách ghé.</p>` : ''}
+      </div>` : ''}
       <div class="card"><h3>Khách còn quà chưa nhận (${d.pending.length})</h3>
         ${d.pending.length ? `<div class="list">${d.pending.map(p => `
           <button class="item" data-act="open" data-id="${p.id}"><div class="grow"><b>${esc(p.name)}</b>
@@ -482,13 +532,18 @@ const Views = {
       && (!q || App.fold(c.name).includes(q) || (soQ.length >= 3 && c.phone.includes(soQ))));
     if (st.only === 'gift') rows = rows.filter(c => c.pending.length);
     if (st.only === 'flag') rows = rows.filter(c => c.flagged);
+    /* Tháng sinh nhật: xếp theo ngày trong tháng. Chưa có ngày sinh: chỉ
+       khách thuộc hạng có quà — những người quầy cần hỏi. */
+    const thangNay = (App.today || '').slice(5, 7);
+    if (st.only === 'bday') rows = rows.filter(c => c.birthday && c.birthday.slice(0, 2) === thangNay);
+    if (st.only === 'nobday') rows = rows.filter(c => c.bday_eligible && !c.birthday && c.visits);
     const so = {
       last:  (a, b) => String(b.last || '').localeCompare(String(a.last || '')),
       cuts:  (a, b) => b.cuts - a.cuts,
       spend: (a, b) => b.spend - a.spend,
       name:  (a, b) => a.name.localeCompare(b.name, 'vi'),
     }[st.sort || 'last'];
-    rows.sort(so);
+    rows.sort(st.only === 'bday' ? (a, b) => a.birthday.localeCompare(b.birthday) : so);
     if (st.barber) rows = rows.filter(c => c.barber_id === st.barber);
     const thoById = {};
     (App.data.barbersAll || []).forEach(b => thoById[b.id] = b);
@@ -505,7 +560,7 @@ const Views = {
         <th class="r">Đã chi</th><th>Ghé gần nhất</th><th>Quà chờ</th></tr></thead>
       <tbody>${hien.map(c => `<tr data-act="open" data-id="${c.id}">
         <td><b>${esc(c.name || '(chưa có tên)')}</b>${c.flagged ? ' <span class="badge bad">⚠︎</span>' : ''}</td>
-        <td class="num">${esc(c.phone)}</td>
+        <td class="num">${esc(c.phone)}${c.birthday ? ` <span class="dim">🎂 ${ngaySinh(c.birthday)}</span>` : ''}</td>
         <td>${tierBadge(tierById[c.tier_id])}</td>
         <td>${esc(tenTho(c))}</td>
         <td class="r num">${c.cuts}</td>
@@ -534,6 +589,8 @@ const Views = {
         ${tiers.map(t => `<button class="chip${st.tier === t.id ? ' on' : ''}" data-act="cf" data-k="tier" data-v="${t.id}">${esc(t.name)}</button>`).join('')}
         <button class="chip${st.only === 'gift' ? ' on' : ''}" data-act="cf" data-k="gift">🎁 Chờ quà</button>
         <button class="chip${st.only === 'flag' ? ' on' : ''}" data-act="cf" data-k="flag">⚠︎ Có cờ</button>
+        <button class="chip${st.only === 'bday' ? ' on' : ''}" data-act="cf" data-k="bday">🎂 Sinh nhật tháng này</button>
+        <button class="chip${st.only === 'nobday' ? ' on' : ''}" data-act="cf" data-k="nobday">Chưa có ngày sinh</button>
       </div>
       <div class="chips">
         ${[['last', 'Ghé gần đây'], ['cuts', 'Cắt nhiều nhất'], ['spend', 'Chi nhiều nhất'], ['name', 'Tên A–Z']].map(([k, n]) =>
@@ -619,6 +676,8 @@ const Views = {
           ${i > 0 ? `<div><label>Từ số lần cắt</label><input inputmode="numeric" data-tier="${i}" data-f="min_cuts" value="${t.min_cuts || ''}" placeholder="0 = không xét"></div>
           <div><label>Hoặc tổng chi từ (đ)</label><input inputmode="numeric" data-tier="${i}" data-f="min_spend" data-money value="${soTien(t.min_spend)}" placeholder="0 = không xét"></div>` : ''}
         </div>
+        <div style="margin-top:8px"><label>🎂 Quà sinh nhật (để trống = hạng này không có) — quầy sẽ hỏi ngày sinh khách từ hạng này</label>
+          <input data-tier="${i}" data-f="bday_gift" value="${esc(t.bday_gift || '')}" placeholder="vd. Gội dưỡng miễn phí"></div>
         <div style="margin-top:8px"><label>Đặc quyền — mỗi dòng một điều (hiện trên thẻ khách và tab Khách)</label>
           <textarea data-tier="${i}" data-f="perks" rows="4" placeholder="Giảm 10% sản phẩm&#10;Ưu tiên đặt lịch">${esc(t.perks)}</textarea></div>
       </div>`).join('')}
