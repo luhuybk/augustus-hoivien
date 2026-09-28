@@ -29,9 +29,32 @@ function report(pass){
   console.log('Về sau đổi mật khẩu trong app: Thiết lập → Đổi mật khẩu.\n');
 }
 
+/* Hỏi mật khẩu mà KHÔNG hiện chữ lên màn hình — chỉ hiện dấu *. Hiện
+   nguyên chữ thì mật khẩu nằm lại trong lịch sử terminal, ai liếc qua
+   hay chụp màn hình gửi nhờ xem lỗi là lộ. */
+function hoiAn(cau){
+  return new Promise(xong => {
+    const rl = readline.createInterface({input: process.stdin, output: process.stdout, terminal: true});
+    let dangHoi = true;
+    rl._writeToOutput = s => {
+      if (!dangHoi || s.startsWith(cau)) return process.stdout.write(s);
+      if (s === '\r\n' || s === '\n') return process.stdout.write(s);
+      process.stdout.write('*'.repeat([...s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')].length));
+    };
+    rl.question(cau, a => { dangHoi = false; rl.close(); process.stdout.write('\n'); xong(a); });
+  });
+}
+
 const arg = process.argv.slice(2).join(' ');
 if (arg) report(arg);
-else {
-  const rl = readline.createInterface({input: process.stdin, output: process.stdout});
-  rl.question('Mật khẩu chủ quán: ', a => { rl.close(); report(a); });
-}
+else (async () => {
+  const a = await hoiAn('Mật khẩu chủ quán: ');
+  /* Gõ hai lần: không thấy chữ thì gõ nhầm là không biết, mà mật khẩu
+     chủ đặt sai thì chính mình bị khoá ngoài app. */
+  const b = await hoiAn('Gõ lại lần nữa:    ');
+  if (a.trim() !== b.trim()){
+    console.error('\n⚠︎  Hai lần gõ không khớp — chạy lại lệnh.\n');
+    process.exit(1);
+  }
+  report(a);
+})();
