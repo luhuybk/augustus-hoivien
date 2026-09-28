@@ -62,6 +62,7 @@ function customerCard(int $cid, array $u): array {
       'phone' => $owner ? $c['phone'] : mhMask($c['phone']),
       'note' => $c['note'], 'kv_code' => $c['kv_code'], 'created_at' => (int)$c['created_at'],
     ],
+    'bday'    => mhBdayState($c, $tier['tier'], isset(mhBdayGivenThisYear()[$cid])),
     'stats'   => $s,
     'tier'    => $tier,
     'rewards' => mhCustomerRewards($cid),
@@ -78,6 +79,12 @@ function customerCard(int $cid, array $u): array {
     })(),
   ];
   if ($owner) {
+    $st = db()->prepare('SELECT g.year, g.gift, g.given_at, u.name AS by_name FROM birthday_given g
+                      LEFT JOIN users u ON u.id = g.given_by WHERE g.customer_id = ? ORDER BY g.year DESC');
+    $st->execute([$cid]);
+    $ra['bday_given'] = array_map(function ($g) {
+      return ['year' => (int)$g['year'], 'gift' => $g['gift'], 'given_at' => (int)$g['given_at'], 'by' => $g['by_name']];
+    }, $st->fetchAll());
     $st = db()->prepare('SELECT phone FROM customer_aliases WHERE customer_id = ? ORDER BY created_at');
     $st->execute([$cid]);
     $ra['aliases'] = $st->fetchAll(PDO::FETCH_COLUMN);
@@ -118,6 +125,7 @@ function allCustomers(): array {
     $flag[(int)$r['customer_id']] = (int)$r['n'];
 
   $tho = mhMainBarbers();
+  $sn  = mhBdayGivenThisYear();
   $ra = [];
   foreach (db()->query('SELECT * FROM customers ORDER BY name')->fetchAll() as $c) {
     $cid = (int)$c['id'];
@@ -128,10 +136,13 @@ function allCustomers(): array {
       $st = mhRewardState($p, $counts[$p['id']][$cid] ?? 0, $given[$cid][$p['id']] ?? []);
       foreach ($st['pending'] as $e) $pend[] = $e['gift'];
     }
+    $bd = mhBdayState($c, $t, isset($sn[$cid]));
+    if ($bd['pending']) $pend[] = '🎂 ' . $bd['gift'];
     $ra[] = ['id' => $cid, 'name' => $c['name'], 'phone' => $c['phone'],
              'visits' => $s['visits'], 'cuts' => $s['cuts'], 'spend' => $s['spend'], 'last' => $s['last'],
              'tier_id' => $t ? $t['id'] : null, 'pending' => $pend, 'flagged' => $flag[$cid] ?? 0,
              'barber_id' => $tho[$cid] ?? null,
+             'birthday' => $bd['birthday'], 'bday_eligible' => $bd['eligible'], 'bday_given' => $bd['given'],
              'created_at' => (int)$c['created_at']];
   }
   return $ra;
@@ -245,6 +256,7 @@ case 'search': {
     $t = mhTierOf($s['cuts'], $s['spend'], $tiers)['tier'];
     $pending = 0;
     foreach (mhCustomerRewards($cid) as $p) $pending += count($p['pending']);
+    if (mhBdayState($c, $t, isset(mhBdayGivenThisYear()[$cid]))['pending']) $pending++;
     $ra[] = ['id' => $cid, 'name' => $c['name'],
              'phone' => mhIsOwner($u) ? $c['phone'] : mhMask($c['phone']),
              'cuts' => $s['cuts'], 'last' => $s['last'], 'tier' => $t, 'pending' => $pending];
@@ -297,6 +309,10 @@ case 'customer_update': {
   }
   $pdo->prepare('UPDATE customers SET name = ?, phone = ?, last4 = ?, note = ? WHERE id = ?')
       ->execute([$name, $phone, substr($phone, -4), $note, $id]);
+  if (inp('bd_day') !== null) {
+    [$bd, $by] = mhParseBday(inp('bd_day'), inp('bd_month'), inp('bd_year'));
+    $pdo->prepare('UPDATE customers SET birthday = ?, birth_year = ? WHERE id = ?')->execute([$bd, $by, $id]);
+  }
   $pdo->commit();
   mhAudit($u['id'], 'customer_update', "#$id " . $c['name'] . ($c['phone'] !== $phone ? ' · đổi số' : ''));
   out(['ok' => true] + customerCard($id, $u));
@@ -527,6 +543,47 @@ case 'barbers_save': {
   out(['ok' => true]);
 }
 
+/* ===== sinh nhật ===== */
+
+/* Quầy ghi ngày sinh khi khách chưa có — hỏi ngay tại quầy. Đã có rồi thì
+   chỉ chủ sửa được: không thì đổi ngày sinh sang tháng này là "có quà". */
+case 'customer_birthday': {
+  $u = mhRequireUser();
+  $id = (int)inp('id', 0);
+  $c = mhCustomerRow($id);
+  if (!$c) out(['ok' => false, 'error' => 'Không tìm thấy khách.'], 404);
+  if (!mhIsOwner($u) && $c['birthday'] !== '')
+    out(['ok' => false, 'error' => 'Khách đã có ngày sinh — muốn sửa thì nhờ chủ quán.'], 403);
+  [$bd, $by] = mhParseBday(inp('day'), inp('month'), inp('year'));
+  if ($bd === '' && !mhIsOwner($u)) out(['ok' => false, 'error' => 'Chọn ngày và tháng sinh.'], 400);
+  db()->prepare('UPDATE customers SET birthday = ?, birth_year = ? WHERE id = ?')->execute([$bd, $by, $id]);
+  mhAudit($u['id'], 'customer_birthday', "#$id " . $c['name'] . ' · ' . ($bd ?: 'xoá') . ($by ? "-$by" : ''));
+  out(['ok' => true] + customerCard($id, $u));
+}
+
+case 'birthday_give': {
+  $u = mhRequireUser();
+  $cid = (int)inp('customer_id', 0);
+  $c = mhCustomerRow($cid);
+  if (!$c) out(['ok' => false, 'error' => 'Không tìm thấy khách.'], 404);
+  $s = mhStats($cid)[$cid];
+  $bd = mhBdayState($c, mhTierOf($s['cuts'], $s['spend'], mhTiers())['tier'], isset(mhBdayGivenThisYear()[$cid]));
+  if (!$bd['pending']) out(['ok' => false, 'error' => 'Quà sinh nhật không còn chờ trao (đã trao năm nay, hoặc chưa tới tháng sinh nhật).'], 409);
+  db()->prepare('INSERT OR IGNORE INTO birthday_given (customer_id, year, gift, given_at, given_by) VALUES (?,?,?,?,?)')
+      ->execute([$cid, (int)date('Y'), $bd['gift'], time(), $u['id']]);
+  mhAudit($u['id'], 'birthday_give', "khách #$cid · " . $bd['gift']);
+  out(['ok' => true] + customerCard($cid, $u));
+}
+
+case 'birthday_ungive': {
+  $u = mhRequireOwner();
+  $cid = (int)inp('customer_id', 0);
+  $nam = (int)inp('year', 0);
+  db()->prepare('DELETE FROM birthday_given WHERE customer_id = ? AND year = ?')->execute([$cid, $nam]);
+  mhAudit($u['id'], 'birthday_ungive', "khách #$cid · $nam");
+  out(['ok' => true] + customerCard($cid, $u));
+}
+
 /* ===== trao quà ===== */
 
 case 'reward_give': {
@@ -662,12 +719,13 @@ case 'tiers_save': {
   $pdo = db();
   $pdo->beginTransaction();
   $giu = [];
-  $up  = $pdo->prepare('UPDATE tiers SET name=?, color=?, min_cuts=?, min_spend=?, perks=?, sort=? WHERE id=?');
-  $ins = $pdo->prepare('INSERT INTO tiers (name, color, min_cuts, min_spend, perks, sort) VALUES (?,?,?,?,?,?)');
+  $up  = $pdo->prepare('UPDATE tiers SET name=?, color=?, min_cuts=?, min_spend=?, perks=?, sort=?, bday_gift=? WHERE id=?');
+  $ins = $pdo->prepare('INSERT INTO tiers (name, color, min_cuts, min_spend, perks, sort, bday_gift) VALUES (?,?,?,?,?,?,?)');
   foreach (array_values($rows) as $i => $r) {
     $color = preg_match('/^#[0-9a-fA-F]{6}$/', (string)($r['color'] ?? '')) ? $r['color'] : '#888888';
     $vals = [trim((string)$r['name']), $color, max(0, (int)($r['min_cuts'] ?? 0)),
-             max(0, (int)($r['min_spend'] ?? 0)), trim((string)($r['perks'] ?? '')), $i + 1];
+             max(0, (int)($r['min_spend'] ?? 0)), trim((string)($r['perks'] ?? '')), $i + 1,
+             trim((string)($r['bday_gift'] ?? ''))];
     if (!empty($r['id'])) { $up->execute(array_merge($vals, [(int)$r['id']])); $giu[] = (int)$r['id']; }
     else { $ins->execute($vals); $giu[] = (int)$pdo->lastInsertId(); }
   }
@@ -788,7 +846,22 @@ case 'dashboard': {
   $st2->execute([$month . '-01', $month . '-%']);
   $khongTho = $q("SELECT COUNT(*) n FROM visits WHERE void_at IS NULL AND barber_id IS NULL AND visit_date LIKE ?", [$month . '-%']);
 
+  /* Sinh nhật tháng này của khách được quà, và khách được quà mà chưa
+     có ngày sinh — để quầy nhớ hỏi. */
+  $sinhNhat = []; $thieuNgay = 0;
+  $hangById = [];
+  foreach (mhTiers() as $t) $hangById[$t['id']] = $t;
+  foreach ($all as $c) {
+    if (!$c['bday_eligible']) continue;
+    if ($c['birthday'] === '') { if ($c['visits']) $thieuNgay++; continue; }
+    if (substr($c['birthday'], 0, 2) !== date('m')) continue;
+    $sinhNhat[] = ['id' => $c['id'], 'name' => $c['name'], 'phone' => $c['phone'], 'birthday' => $c['birthday'],
+                   'given' => $c['bday_given'], 'tier' => isset($hangById[$c['tier_id']]) ? mhTierPublic($hangById[$c['tier_id']]) : null];
+  }
+  usort($sinhNhat, function ($a, $b) { return strcmp($a['birthday'], $b['birthday']); });
+
   out(['ok' => true,
+       'birthdays' => $sinhNhat, 'bday_missing' => $thieuNgay,
        'barbers' => array_map(function ($r) {
          return ['id' => (int)$r['id'], 'name' => $r['name'], 'visits' => (int)$r['n'], 'customers' => (int)$r['k'],
                  'amount' => (int)$r['s'], 'returning' => (int)$r['cu']]; }, $st2->fetchAll()),

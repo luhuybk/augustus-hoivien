@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS customers (
   name        TEXT    NOT NULL DEFAULT '',
   kv_code     TEXT,                          -- mã khách bên KiotViet (KH001262)
   note        TEXT    NOT NULL DEFAULT '',
+  birthday    TEXT    NOT NULL DEFAULT '',   -- 'MM-DD'; năm để riêng vì khách hay không nói
+  birth_year  INTEGER,
   created_at  INTEGER NOT NULL,
   created_by  INTEGER
 );
@@ -164,7 +166,18 @@ CREATE TABLE IF NOT EXISTS tiers (
   min_cuts   INTEGER NOT NULL DEFAULT 0,
   min_spend  INTEGER NOT NULL DEFAULT 0,
   perks      TEXT    NOT NULL DEFAULT '',
+  bday_gift  TEXT    NOT NULL DEFAULT '',     -- quà sinh nhật của hạng này; trống = không có
   sort       INTEGER NOT NULL DEFAULT 0
+);
+
+/* Quà sinh nhật đã trao — mỗi khách mỗi năm một lần. */
+CREATE TABLE IF NOT EXISTS birthday_given (
+  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  year        INTEGER NOT NULL,
+  gift        TEXT    NOT NULL,
+  given_at    INTEGER NOT NULL,
+  given_by    INTEGER,
+  PRIMARY KEY (customer_id, year)
 );
 
 /* Chương trình quà theo mốc.

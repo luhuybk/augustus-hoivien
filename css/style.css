@@ -283,3 +283,9 @@ button.tcard:hover{background:var(--bg3)}
 .tq i{font-style:normal;opacity:.75;font-weight:500}
 .tho{font-weight:600;color:var(--tx)}
 .vbsel{padding:6px 8px;border-radius:8px;background:var(--bg3);border:1px solid var(--line);font-size:13px;max-width:120px}
+
+/* ---------------- sinh nhật ---------------- */
+.bdask{border:2px dashed var(--gift)}
+.bdask h3{color:var(--gift)}
+.bdrow select,.bdrow input{padding:11px}
+.sn-nay{color:var(--gift);font-weight:700}
