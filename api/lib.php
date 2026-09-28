@@ -100,6 +100,12 @@ function mhMigrate(PDO $pdo): void {
   if ($sql === false) mhFail('Thiếu file api/schema.sql.', 500);
   $pdo->exec($sql);
 
+  /* "CREATE TABLE IF NOT EXISTS" không thêm cột vào bảng đã có — máy đang
+     chạy bản cũ phải tự vá. Chỉ mục trên cột mới cũng phải đặt SAU khi vá,
+     không thì schema.sql chạy trên CSDL cũ báo "no such column". */
+  mhAddColumn($pdo, 'visits', 'barber_id', 'INTEGER');
+  $pdo->exec('CREATE INDEX IF NOT EXISTS idx_visit_barber ON visits(barber_id, visit_date)');
+
   if ((int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn() > 0) return;
 
   /* Lần đầu chạy: dựng sẵn tài khoản chủ, dịch vụ theo đúng mã hàng trong
@@ -148,6 +154,11 @@ function mhMigrate(PDO $pdo): void {
   $p->execute(['Uốn tặng tinh dầu', 'perm', json_encode([
       ['at' => 1, 'gift' => 'Tinh dầu dưỡng tóc'],
     ], JSON_UNESCAPED_UNICODE), 1, mhToday(), 2, $now]);
+}
+
+function mhAddColumn(PDO $pdo, string $bang, string $cot, string $kieu): void {
+  foreach ($pdo->query("PRAGMA table_info($bang)")->fetchAll() as $c) if ($c['name'] === $cot) return;
+  $pdo->exec("ALTER TABLE $bang ADD COLUMN $cot $kieu");
 }
 
 /* ---------------- tiện ích ---------------- */
@@ -486,11 +497,8 @@ function mhCustomerRow(int $cid): ?array {
 
 /* Tạo khách, hoặc trả về khách đã có số đó. */
 function mhEnsureCustomer(string $phone, string $name, ?int $uid, string $kvCode = ''): array {
-  $st = db()->prepare('SELECT * FROM customers WHERE phone = ?');
-  $st->execute([$phone]);
-  $c = $st->fetch();
+  $c = mhFindByPhone($phone);
   if ($c) {
-    $c['id'] = (int)$c['id'];
     /* Bổ sung chỗ còn trống, không ghi đè tên chủ đã sửa tay. */
     if (($c['name'] === '' && $name !== '') || ($kvCode !== '' && !$c['kv_code'])) {
       db()->prepare("UPDATE customers SET name = CASE WHEN name = '' THEN ? ELSE name END,
@@ -503,6 +511,87 @@ function mhEnsureCustomer(string $phone, string $name, ?int $uid, string $kvCode
   db()->prepare('INSERT INTO customers (phone, last4, name, kv_code, created_at, created_by) VALUES (?,?,?,?,?,?)')
       ->execute([$phone, substr($phone, -4), $name, $kvCode ?: null, time(), $uid]);
   return ['id' => (int)db()->lastInsertId(), 'phone' => $phone, 'name' => $name, '_new' => true];
+}
+
+/* Tìm khách theo số điện thoại — số đang dùng hoặc số cũ (đã đổi / đã gộp). */
+function mhFindByPhone(string $phone): ?array {
+  $st = db()->prepare('SELECT * FROM customers WHERE phone = ?
+                       UNION ALL
+                       SELECT c.* FROM customer_aliases a JOIN customers c ON c.id = a.customer_id WHERE a.phone = ?
+                       LIMIT 1');
+  $st->execute([$phone, $phone]);
+  $c = $st->fetch();
+  if (!$c) return null;
+  $c['id'] = (int)$c['id'];
+  return $c;
+}
+
+function mhAddAlias(string $phone, int $cid): void {
+  if (strlen($phone) < 9) return;
+  db()->prepare('INSERT INTO customer_aliases (phone, last4, customer_id, created_at) VALUES (?,?,?,?)
+                 ON CONFLICT(phone) DO UPDATE SET customer_id = excluded.customer_id')
+      ->execute([$phone, substr($phone, -4), $cid, time()]);
+}
+
+/* ============================================================
+   Thợ cắt
+   ============================================================ */
+
+function mhBarbers(bool $activeOnly = false): array {
+  $rows = db()->query('SELECT * FROM barbers' . ($activeOnly ? ' WHERE active = 1' : '')
+                    . ' ORDER BY active DESC, sort, id')->fetchAll();
+  foreach ($rows as &$b) { $b['id'] = (int)$b['id']; $b['active'] = (int)$b['active']; $b['sort'] = (int)$b['sort']; }
+  unset($b);
+  return $rows;
+}
+
+/* KiotViet đánh dấu tài khoản đã xoá bằng đuôi "{DEL}". */
+function mhCleanKvName(string $s): string {
+  return trim((string)preg_replace('/\{DEL\}\s*$/i', '', trim($s)));
+}
+
+/* Tên ở cột "Người bán" → id thợ. Chưa có thì tạo luôn (thợ đã bị xoá
+   bên KiotViet thì tạo ở trạng thái tắt) — nhập file lịch sử cả năm mà
+   bắt chủ khai trước từng thợ cũ thì không ai làm. */
+function mhBarberFromKv(string $raw, array &$cache, array &$moi): ?int {
+  $ten = mhCleanKvName($raw);
+  if ($ten === '') return null;
+  $k = mhFold($ten);
+  if (!$cache) foreach (mhBarbers() as $b) {
+    $cache[mhFold($b['kv_name'] !== '' ? $b['kv_name'] : $b['name'])] = $b['id'];
+    $cache += [mhFold($b['name']) => $b['id']];
+  }
+  if (isset($cache[$k])) return $cache[$k];
+  $tat = preg_match('/\{DEL\}/i', $raw) ? 0 : 1;
+  $sort = (int)db()->query('SELECT COALESCE(MAX(sort),0)+1 FROM barbers')->fetchColumn();
+  db()->prepare('INSERT INTO barbers (name, kv_name, active, sort, created_at) VALUES (?,?,?,?,?)')
+      ->execute([$ten, $ten, $tat, $sort, time()]);
+  $cache[$k] = (int)db()->lastInsertId();
+  $moi[] = $ten . ($tat ? '' : ' (đã nghỉ)');
+  return $cache[$k];
+}
+
+/* Thợ quen của một khách: đếm lượt theo từng thợ, nhiều nhất lên đầu. */
+function mhCustomerBarbers(int $cid): array {
+  $st = db()->prepare('SELECT v.barber_id AS id, b.name, b.active, COUNT(*) AS n, MAX(v.visit_date) AS last
+                         FROM visits v JOIN barbers b ON b.id = v.barber_id
+                        WHERE v.customer_id = ? AND v.void_at IS NULL
+                        GROUP BY v.barber_id ORDER BY n DESC, last DESC');
+  $st->execute([$cid]);
+  return array_map(function ($r) {
+    return ['id' => (int)$r['id'], 'name' => $r['name'], 'active' => (int)$r['active'],
+            'n' => (int)$r['n'], 'last' => $r['last']];
+  }, $st->fetchAll());
+}
+
+/* Thợ chính của mọi khách (thợ có nhiều lượt nhất) — [customer_id => barber_id]. */
+function mhMainBarbers(): array {
+  $ra = [];
+  foreach (db()->query('SELECT customer_id, barber_id, COUNT(*) n, MAX(visit_date) last FROM visits
+                         WHERE void_at IS NULL AND barber_id IS NOT NULL
+                         GROUP BY customer_id, barber_id ORDER BY n, last')->fetchAll() as $r)
+    $ra[(int)$r['customer_id']] = (int)$r['barber_id'];     // sắp tăng dần → dòng cuối thắng
+  return $ra;
 }
 
 /* Bảng tra mã hàng KiotViet → dịch vụ. */
@@ -537,9 +626,10 @@ function mhDelFlag(int $visitId, string $flag): void {
 /* Danh sách lượt, kèm dịch vụ và tên người ghi. */
 function mhVisitList(string $where, array $args, int $limit = 200): array {
   $st = db()->prepare("SELECT v.*, u.name AS by_name, vu.name AS void_by_name,
-                              c.name AS customer_name, c.phone AS customer_phone
+                              c.name AS customer_name, c.phone AS customer_phone, b.name AS barber_name
                          FROM visits v
                          JOIN customers c ON c.id = v.customer_id
+                    LEFT JOIN barbers b ON b.id = v.barber_id
                     LEFT JOIN users u  ON u.id  = v.created_by
                     LEFT JOIN users vu ON vu.id = v.void_by
                         WHERE $where
@@ -559,6 +649,7 @@ function mhVisitList(string $where, array $args, int $limit = 200): array {
     $r['id'] = (int)$r['id']; $r['customer_id'] = (int)$r['customer_id'];
     $r['amount'] = (int)$r['amount']; $r['created_at'] = (int)$r['created_at'];
     $r['created_by'] = $r['created_by'] !== null ? (int)$r['created_by'] : null;
+    $r['barber_id'] = $r['barber_id'] !== null ? (int)$r['barber_id'] : null;
     $r['void_at'] = $r['void_at'] !== null ? (int)$r['void_at'] : null;
     $r['items'] = $items[$r['id']] ?? [];
     $r['flags'] = array_values(array_filter(explode(',', (string)$r['flags'])));

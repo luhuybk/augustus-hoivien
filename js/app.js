@@ -21,8 +21,9 @@ const App = {
   stack: [{name: 'lookup'}],
   kinds: {}, shop: '', today: '', undoMinutes: 15,
   services: null,
+  barbers: null,          /* thợ đang làm — để chọn khi ghi lượt */
   look: {q: '', mode: 'num', rows: null, err: ''},
-  cus: {q: '', tier: null, only: '', sort: 'last', limit: 100},
+  cus: {q: '', tier: null, only: '', sort: 'last', limit: 100, barber: null},
   ui: {sel: new Map(), justGot: [], date: ''},
   data: {},
 
@@ -131,9 +132,14 @@ const App = {
       }
       case 'card': {
         if (!this.services) this.services = (await API.call('services')).rows;
+        if (!this.barbers) this.barbers = (await API.call('barbers')).rows.filter(b => b.active);
         if (!this.data.card || this.data.card.customer.id !== s.id){
-          this.ui = {sel: new Map(), justGot: [], date: this.today};
           this.data.card = await API.call('customer_get', {id: s.id});
+          /* Chọn sẵn thợ của lượt trước — khách quen phần lớn ngồi lại đúng
+             ghế cũ. Thợ đó đã nghỉ thì để trống cho quầy chọn. */
+          const lb = this.data.card.last_barber_id;
+          this.ui = {sel: new Map(), justGot: [], date: this.today,
+                     barber: this.barbers.some(b => b.id === lb) ? lb : null};
         }
         const tu = this.splitFrom();
         if (tu){
@@ -147,6 +153,8 @@ const App = {
       }
       case 'newCus':    view.innerHTML = Views.newCus(s.pre || {}); break;
       case 'day':
+        /* Danh sách thợ để sửa thợ ngay trên dòng lượt vừa ghi nhầm. */
+        if (!this.barbers) this.barbers = (await API.call('barbers')).rows.filter(b => b.active);
         this.data.day = await API.call('day', s.date ? {date: s.date} : {});
         view.innerHTML = Views.day(this.data.day);
         break;
@@ -161,7 +169,7 @@ const App = {
         break;
       case 'customers': {
         const r = await API.call('customers_all');
-        this.data.all = r.rows; this.data.tiers = r.tiers;
+        this.data.all = r.rows; this.data.tiers = r.tiers; this.data.barbersAll = r.barbers;
         this.drawCustomers();
         break;
       }
@@ -184,6 +192,11 @@ const App = {
         break;
       }
       case 'import':    view.innerHTML = Views.importView(this.data.imp || (this.data.imp = {})); break;
+      case 'barbers': {
+        this.data.barberEdit = (await API.call('barbers')).rows.map(x => Object.assign({}, x));
+        view.innerHTML = Views.barbers(this.data.barberEdit);
+        break;
+      }
       case 'users':     view.innerHTML = Views.users((await API.call('users')).rows); break;
       case 'audit':     view.innerHTML = Views.audit((await API.call('audit')).rows); break;
       case 'password':  view.innerHTML = Views.password(); break;
@@ -324,6 +337,24 @@ const App = {
         /* await ở đây: trả thẳng promise thì lỗi máy chủ (vd. "đã cắt hôm
            nay rồi") lọt khỏi try, quầy không thấy báo gì, nút kẹt ở mờ. */
         case 'addVisit': return await this.addVisit(el);
+        case 'pickBarber':
+          this.ui.barber = this.ui.barber === id ? null : id;
+          return this.drawCard();
+        case 'merge': {
+          if (!this.hoiLai(el, 'Chắc chưa? Bấm lần nữa')) return;
+          el.disabled = true;
+          this.data.card = await API.call('customer_merge', {into: this.data.card.customer.id, from: id});
+          Object.assign(this.ui, {mergeQ: '', mergeRows: null, mergeOpen: false});
+          toast('Đã gộp khách', 'ok');
+          this.drawCard();
+          return this.refreshLeft();
+        }
+        case 'aliasDel': {
+          if (!this.hoiLai(el, 'Bỏ?')) return;
+          this.data.card = await API.call('alias_del', {phone: el.dataset.phone});
+          toast('Đã bỏ số phụ', 'ok');
+          return this.drawCard();
+        }
         case 'give': {
           if (!this.hoiLai(el, 'Chắc chưa?')) return;
           el.disabled = true;
@@ -361,7 +392,7 @@ const App = {
           API.clear();
           /* Máy quầy dùng chung: chủ đăng xuất xong thì danh sách khách (có
              số điện thoại đầy đủ) không được nằm lại trong bộ nhớ trang. */
-          this.today = ''; this.data = {}; this.services = null;
+          this.today = ''; this.data = {}; this.services = null; this.barbers = null;
           this.look = {q: '', mode: 'num', rows: null, err: ''};
           return this.go('lookup');
 
@@ -375,6 +406,7 @@ const App = {
           return this.drawCustomers();
         }
         case 'cs':   this.cus.sort = el.dataset.k; return this.drawCustomers();
+        case 'cb':   this.cus.barber = id || null; this.cus.limit = 100; return this.drawCustomers();
         case 'more': this.cus.limit += 200; return this.drawCustomers();
 
         /* chương trình */
@@ -436,6 +468,21 @@ const App = {
           return this.back();
         }
 
+        /* thợ cắt */
+        case 'barberAdd':
+          this.data.barberEdit.push({id: 0, name: '', kv_name: '', active: 1});
+          return $('#view').innerHTML = Views.barbers(this.data.barberEdit);
+        case 'saveBarbers': {
+          el.disabled = true;
+          await API.call('barbers_save', {rows: this.data.barberEdit});
+          this.barbers = null;
+          toast('Đã lưu thợ cắt', 'ok');
+          return this.back();
+        }
+        case 'thoKhach':
+          Object.assign(this.cus, {barber: id, tier: null, only: '', sort: 'cuts', q: '', limit: 100});
+          return this.go('customers');
+
         case 'importGo':
           el.disabled = true;               // bấm hai lần là gửi hai lượt ghi
           return await this.importRun(true);
@@ -455,7 +502,8 @@ const App = {
     if (!items.length) return;
     el.disabled = true;
     const d = $('#visitDate');
-    const r = await API.call('visit_add', Object.assign({customer_id: this.data.card.customer.id, items},
+    const r = await API.call('visit_add', Object.assign({customer_id: this.data.card.customer.id, items,
+                                                         barber_id: this.ui.barber || 0},
                                                         d && d.value ? {date: d.value} : {}));
     this.data.card = r;
     this.ui.sel = new Map();
@@ -466,6 +514,15 @@ const App = {
     } else toast('Đã ghi lượt', 'ok');
     this.drawCard();
     this.refreshLeft();
+  },
+
+  async changeBarber(vid, bid){
+    try{
+      const r = await API.call('visit_barber', {id: vid, barber_id: bid});
+      toast('Đã đổi thợ', 'ok');
+      if (this.cur.name === 'card'){ this.data.card = r; this.drawCard(); }
+      else this.render();
+    }catch(e){ toast(e.message, 'bad'); this.render(); }
   },
 
   /* Cột trái (khi chia đôi) cập nhật theo: số lần cắt, huy hiệu 🎁… */
@@ -515,7 +572,7 @@ const App = {
     try{
       st.result = await API.call('import', {invoices: st.file.invoices, commit});
       st.busy = ''; st.err = '';
-      if (commit){ toast('Đã nhập xong', 'ok'); this.services = null; }
+      if (commit){ toast('Đã nhập xong', 'ok'); this.services = null; this.barbers = null; }
     }catch(e){ st.busy = ''; st.err = e.message; }
     $('#view').innerHTML = Views.importView(st);
   },
@@ -553,6 +610,21 @@ const App = {
       }
       return;
     }
+    if (t.id === 'mergeQ'){
+      this.ui.mergeQ = t.value; this.ui.mergeOpen = true;
+      clearTimeout(this._tm);
+      this._tm = setTimeout(async () => {
+        const q = t.value.trim();
+        let rows = null;
+        if (q.replace(/\D/g, '').length >= 4 || (q.length >= 2 && /\D/.test(q))){
+          try{ rows = (await API.call('search', {q})).rows; }catch(err){ rows = []; }
+        }
+        this.ui.mergeRows = rows;
+        const box = $('#mergeRes');
+        if (box) box.innerHTML = Views.mergeResults(rows, this.data.card.customer.id);
+      }, 300);
+      return;
+    }
     if (t.id === 'cusQ'){
       this.cus.q = t.value; this.cus.limit = 100;
       clearTimeout(this._tc);
@@ -573,6 +645,7 @@ const App = {
     if (t.id === 'kvFile' && t.files.length) return this.importFiles(t.files);
     if (t.id === 'dayPick'){ this.cur.date = t.value; return this.render(); }
     if (t.id === 'visitDate'){ this.ui.date = t.value; return; }
+    if (t.dataset.vb) return this.changeBarber(Number(t.dataset.vb), Number(t.value));
     this.bindField(t);
   },
 
@@ -591,6 +664,8 @@ const App = {
         const dem = this.tierCounts();
         dem.forEach((n, i) => { const b = document.getElementById('tc' + i); if (b) b.textContent = n + ' khách'; });
       }
+    } else if (t.dataset.bb){
+      this.data.barberEdit[Number(t.dataset.bb)][t.dataset.f] = val;
     } else if (t.dataset.svc){
       const row = this.data.svcEdit[Number(t.dataset.svc)];
       row[t.dataset.f] = t.dataset.f === 'price' ? Number(String(val).replace(/\D/g, '')) || 0 : val;
