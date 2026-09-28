@@ -1,0 +1,10 @@
+{
+  "name": "Hội viên",
+  "short_name": "Hội viên",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#0f0e0c",
+  "theme_color": "#0f0e0c",
+  "lang": "vi",
+  "icons": [{"src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"}]
+}

@@ -1,0 +1,15 @@
+# Chỉ index.php và cron.php được gọi từ ngoài.
+# Cấu hình, thư viện dùng chung, lược đồ và dữ liệu thì không.
+
+<FilesMatch "^(config.*\.php|lib\.php|schema\.sql|.*\.sqlite.*|.*\.db)$">
+  Require all denied
+  Order allow,deny
+  Deny from all
+</FilesMatch>
+
+<IfModule mod_headers.c>
+  Header always set Cache-Control "no-store"
+  Header always set X-Content-Type-Options "nosniff"
+</IfModule>
+
+Options -Indexes
