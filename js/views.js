@@ -12,6 +12,8 @@ const tienGon = n => {
   if (n >= 1e3) return Math.round(n / 1e3) + 'k';
   return String(n);
 };
+/* 1000000 → "1.000.000" cho ô nhập tiền; 0 thì để trống cho hiện chữ gợi ý. */
+const soTien = n => Number(n) ? Number(n).toLocaleString('vi-VN') : '';
 const ngay = d => d ? d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4) : '';
 const ngayNgan = d => d ? d.slice(8, 10) + '/' + d.slice(5, 7) : '';
 
@@ -615,7 +617,7 @@ const Views = {
           <div><label>Tên hạng</label><input data-tier="${i}" data-f="name" value="${esc(t.name)}"></div>
           <div><label>Màu</label><input type="color" data-tier="${i}" data-f="color" value="${esc(t.color)}"></div>
           ${i > 0 ? `<div><label>Từ số lần cắt</label><input inputmode="numeric" data-tier="${i}" data-f="min_cuts" value="${t.min_cuts || ''}" placeholder="0 = không xét"></div>
-          <div><label>Hoặc tổng chi từ (đ)</label><input inputmode="numeric" data-tier="${i}" data-f="min_spend" value="${t.min_spend || ''}" placeholder="0 = không xét"></div>` : ''}
+          <div><label>Hoặc tổng chi từ (đ)</label><input inputmode="numeric" data-tier="${i}" data-f="min_spend" data-money value="${soTien(t.min_spend)}" placeholder="0 = không xét"></div>` : ''}
         </div>
         <div style="margin-top:8px"><label>Đặc quyền — mỗi dòng một điều (hiện trên thẻ khách và tab Khách)</label>
           <textarea data-tier="${i}" data-f="perks" rows="4" placeholder="Giảm 10% sản phẩm&#10;Ưu tiên đặt lịch">${esc(t.perks)}</textarea></div>
@@ -639,7 +641,7 @@ const Views = {
           <div><label>Loại</label><select data-svc="${i}" data-f="kind">
             ${Object.entries(App.kinds).map(([k, n]) => `<option value="${k}"${s.kind === k ? ' selected' : ''}>${esc(n)}</option>`).join('')}
           </select></div>
-          <div><label>Giá tính (đ)</label><input inputmode="numeric" data-svc="${i}" data-f="price" value="${s.price || ''}" placeholder="0 = nhập tay"></div>
+          <div><label>Giá tính (đ)</label><input inputmode="numeric" data-svc="${i}" data-f="price" data-money value="${soTien(s.price)}" placeholder="0 = nhập tay"></div>
           <div><label>Mã KiotViet</label><input data-svc="${i}" data-f="kv_codes" value="${esc(s.kv_codes)}" autocapitalize="characters"></div>
         </div>
         <div class="row" style="margin-top:8px">

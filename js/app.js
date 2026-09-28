@@ -652,6 +652,7 @@ const App = {
   /* Ô trong các bảng sửa nhiều dòng ghi thẳng vào mảng đang sửa — vẽ lại
      (thêm/bớt dòng) không làm mất chữ vừa gõ ở dòng khác. */
   bindField(t){
+    if (t.dataset.money !== undefined) this.dinhDangTien(t);
     const val = t.type === 'checkbox' ? (t.checked ? 1 : 0) : t.value;
     if (t.dataset.pf){
       this.data.prog[t.dataset.pf] = t.dataset.pf === 'active' ? Number(val) : val;
@@ -670,6 +671,21 @@ const App = {
       const row = this.data.svcEdit[Number(t.dataset.svc)];
       row[t.dataset.f] = t.dataset.f === 'price' ? Number(String(val).replace(/\D/g, '')) || 0 : val;
     }
+  },
+
+  /* Gõ tiền thì tự chèn dấu chấm ngăn cách ngay trong ô: "2000000" thành
+     "2.000.000". Con trỏ giữ đúng chỗ theo số chữ số đứng sau nó — không
+     thì mỗi lần chèn dấu con trỏ nhảy về cuối, sửa số ở giữa rất khó. */
+  dinhDangTien(t){
+    const cu = t.value, vt = t.selectionStart == null ? cu.length : t.selectionStart;
+    const sauConTro = cu.slice(vt).replace(/\D/g, '').length;
+    const so = cu.replace(/\D/g, '').replace(/^0+(?=\d)/, '');
+    const moi = so ? Number(so).toLocaleString('vi-VN') : '';
+    if (moi === cu) return;
+    t.value = moi;
+    let p = moi.length, dem = 0;
+    while (p > 0 && dem < sauConTro){ p--; if (/\d/.test(moi[p])) dem++; }
+    try{ t.setSelectionRange(p, p); }catch(e){}
   },
 
   /* ---------------- biểu mẫu ---------------- */
