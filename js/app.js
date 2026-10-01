@@ -24,8 +24,11 @@ const App = {
   barbers: null,          /* thợ đang làm — để chọn khi ghi lượt */
   look: {q: '', mode: 'num', rows: null, err: ''},
   cus: {q: '', tier: null, only: '', sort: 'last', limit: 100, barber: null},
-  ui: {sel: new Map(), justGot: [], date: ''},
+  ui: {justGot: []},
   data: {},
+  posData: {},
+  pos: null,              /* hoá đơn đang lập — giữ nguyên khi chuyển tab qua lại */
+  pay: {open: 0},
 
   get cur(){ return this.stack[this.stack.length - 1]; },
 
@@ -62,6 +65,7 @@ const App = {
         if (w === this._wasWide) return;
         this._wasWide = w;
         if (['card', 'lookup', 'customers'].includes(this.cur.name)) this.render();
+        else if (this.cur.name === 'pos') this.drawPos();
       }, 200);
     });
     this._wasWide = this.wide();
@@ -69,7 +73,7 @@ const App = {
       try{ this.applyMe(await API.call('me')); }
       catch(e){ /* hết phiên thì API.call đã dọn token; lỗi mạng thì vẫn thử vẽ */ }
     }
-    this.go(API.isOwner() ? 'dash' : 'lookup');
+    this.go(API.isOwner() ? 'dash' : 'pos');
   },
 
   applyMe(r){
@@ -81,9 +85,9 @@ const App = {
 
   tabs(){
     return API.isOwner()
-      ? [['lookup', '🔎', 'Quầy'], ['customers', '👥', 'Khách'], ['dash', '📊', 'Tổng quan'],
-         ['day', '📋', 'Sổ ngày'], ['more', '⚙︎', 'Thiết lập']]
-      : [['lookup', '🔎', 'Tra cứu'], ['day', '📋', 'Hôm nay'], ['more', '☰', 'Khác']];
+      ? [['pos', '💳', 'Bán hàng'], ['customers', '👥', 'Khách'], ['day', '📋', 'Sổ ngày'],
+         ['dash', '📊', 'Tổng quan'], ['payroll', '💰', 'Lương'], ['more', '⚙︎', 'Thiết lập']]
+      : [['pos', '💳', 'Bán hàng'], ['lookup', '🔎', 'Tra khách'], ['day', '📋', 'Báo cáo'], ['more', '☰', 'Khác']];
   },
 
   go(tab){ this.stack = [{name: tab}]; window.scrollTo(0, 0); return this.render(); },
@@ -130,16 +134,29 @@ const App = {
         if (this.look.rows && this.look.q) this.search(true);
         break;
       }
+      case 'pos': {
+        /* Mỗi lần vào lại tải dịch vụ / khuyến mãi — chủ vừa đổi giá ở máy
+           khác thì quầy thấy ngay, khỏi lệch tiền lúc thanh toán. */
+        this.posData = await API.call('pos_init');
+        if (!this.pos) this.posReset();
+        this.drawPos();
+        const q = $('#posQ');
+        if (q && window.innerWidth >= 700 && !this.pos.cus) q.focus();
+        break;
+      }
+      case 'payroll': {
+        this.data.payroll = await API.call('payroll', {month: s.month || (this.today || '').slice(0, 7)});
+        view.innerHTML = Views.payroll(this.data.payroll, this.pay);
+        break;
+      }
+      case 'promos':
+        view.innerHTML = Views.promos((await API.call('promos')).rows);
+        break;
       case 'card': {
-        if (!this.services) this.services = (await API.call('services')).rows;
         if (!this.barbers) this.barbers = (await API.call('barbers')).rows.filter(b => b.active);
         if (!this.data.card || this.data.card.customer.id !== s.id){
           this.data.card = await API.call('customer_get', {id: s.id});
-          /* Chọn sẵn thợ của lượt trước — khách quen phần lớn ngồi lại đúng
-             ghế cũ. Thợ đó đã nghỉ thì để trống cho quầy chọn. */
-          const lb = this.data.card.last_barber_id;
-          this.ui = {sel: new Map(), justGot: [], date: this.today,
-                     barber: this.barbers.some(b => b.id === lb) ? lb : null};
+          this.ui = {justGot: []};
         }
         const tu = this.splitFrom();
         if (tu){
@@ -204,11 +221,191 @@ const App = {
     }
   },
 
-  /* Vẽ lại thẻ khách tại chỗ (chọn dịch vụ, gõ giá…) mà không nhảy trang. */
+  /* Vẽ lại thẻ khách tại chỗ mà không nhảy trang. */
   drawCard(){
     const y = window.scrollY;
-    ($('#cardPane') || $('#view')).innerHTML = Views.card(this.data.card, Object.assign({services: this.services}, this.ui));
+    ($('#cardPane') || $('#view')).innerHTML = Views.card(this.data.card, this.ui);
     window.scrollTo(0, y);
+  },
+
+  /* ---------------- bán hàng ---------------- */
+
+  posReset(){
+    this.pos = {cus: null, q: '', rows: null, err: '', newCus: false, newPhone: '',
+                barber: null, lines: [], promo: 0, tip: '', extra: '', pay: '', given: '', cashPart: '',
+                note: '', date: this.today, done: null};
+  },
+
+  /* Cùng công thức với mhQuote (api/lib.php) — đây chỉ để hiện trước;
+     máy chủ tính lại và từ chối nếu lệch. */
+  quote(){
+    const st = this.pos, sv = this.posData.services || [];
+    const lines = st.lines.map(l => {
+      const s = sv.find(x => x.id === l.sid) || {price: 0, discountable: 0};
+      return {svc: s, qty: l.qty, unit: s.price || Number(l.price) || 0};
+    });
+    const gross = lines.map(l => l.unit * l.qty);
+    const elig = lines.map((l, i) => l.svc.discountable ? i : -1).filter(i => i >= 0);
+    const chia = (tong, chon) => {
+      const ra = {};
+      const sum = chon.reduce((a, i) => a + gross[i], 0);
+      if (sum <= 0 || tong <= 0) return ra;
+      tong = Math.min(tong, sum);
+      let co = 0;
+      chon.forEach((i, k) => { const d = k === chon.length - 1 ? tong - co : Math.floor(tong * gross[i] / sum); ra[i] = d; co += d; });
+      return ra;
+    };
+    const pct = p => { const ra = {}; elig.forEach(i => ra[i] = Math.round(gross[i] * p / 100000) * 1000); return ra; };
+    const tong = o => Object.values(o).reduce((a, b) => a + b, 0);
+    const t = st.cus && !st.cus.walkin && st.cus.tier ? st.cus.tier : null;
+    const tierPct = t ? t.disc_pct || 0 : 0;
+    const tier = tierPct > 0 ? pct(tierPct) : {};
+    const promo = (this.posData.promos || []).find(p => p.id === st.promo) || null;
+    const pro = promo ? (promo.kind === 'pct' ? pct(promo.value) : chia(promo.value, elig)) : {};
+    const laKm = tong(pro) > tong(tier);
+    const dung = laKm ? pro : tier;
+    let note = tong(dung) > 0 ? (laKm ? 'KM: ' + promo.name : 'Hạng ' + t.name + ' −' + tierPct + '%') : '';
+    const disc = lines.map((l, i) => Math.min(gross[i], dung[i] || 0));
+    let extra = API.isOwner() ? Number(String(st.extra).replace(/\D/g, '')) || 0 : 0;
+    if (extra > 0 && lines.length){
+      const con = lines.map((l, i) => gross[i] - disc[i]);
+      const tc = con.reduce((a, b) => a + b, 0);
+      extra = Math.min(extra, tc);
+      let co = 0;
+      lines.forEach((l, i) => {
+        let d = i === lines.length - 1 ? extra - co : (tc ? Math.floor(extra * con[i] / tc) : 0);
+        d = Math.min(d, con[i]);
+        disc[i] += d; co += d;
+      });
+      note = (note ? note + ' · ' : '') + 'Chủ giảm thêm';
+    }
+    const ra = {lines: lines.map((l, i) => ({net: gross[i] - disc[i], disc: disc[i]})), note,
+                subtotal: gross.reduce((a, b) => a + b, 0), discount: disc.reduce((a, b) => a + b, 0)};
+    ra.total = ra.subtotal - ra.discount;
+    return ra;
+  },
+
+  /* Số đã gõ trong các ô tiền (có dấu chấm) → số nguyên. */
+  posNums(){
+    const n = v => Number(String(v || '').replace(/\D/g, '')) || 0;
+    const st = this.pos;
+    st.tipN = n(st.tip); st.givenN = n(st.given); st.cashPartN = n(st.cashPart);
+  },
+
+  drawPos(){
+    this.posNums();
+    const y = window.scrollY;
+    const f = document.activeElement && document.activeElement.id;
+    $('#view').innerHTML = Views.pos(this.pos, this.posData, this.quote());
+    window.scrollTo(0, y);
+    if (f && /^pos/.test(f)){ const i = document.getElementById(f); if (i){ i.focus(); try{ i.setSelectionRange(i.value.length, i.value.length); }catch(e){} } }
+  },
+
+  /* Gõ tip / tiền khách đưa: chỉ cập nhật mấy con số, không vẽ lại cả
+     màn — vẽ lại là bàn phím điện thoại sập xuống sau mỗi chữ số. */
+  posLive(){
+    this.posNums();
+    const st = this.pos, q = this.quote(), tong = q.total + st.tipN;
+    const set = (sel, html) => { const e = $(sel); if (e) e.innerHTML = html; };
+    set('#posTotal', tien(tong));
+    set('#posSub', tien(q.subtotal));
+    q.lines.forEach((l, i) => { set('#pnet' + i, tien(l.net)); set('#pdisc' + i, l.disc ? ' · −' + tienGon(l.disc) : ''); });
+    const dr = $('#posDiscRow');
+    if (dr) dr.style.display = q.discount ? '' : 'none';
+    set('#posDiscNote', 'Giảm · ' + esc(q.note));
+    set('#posDiscAmt', '−' + tien(q.discount));
+    set('#posChange', Views.posChange(st, tong));
+    set('#posCkPart', tien(Math.max(0, tong - st.cashPartN)));
+    const nut = document.querySelector('[data-act="posCheckout"]');
+    const thieu = Views.posMissing(st, this.posData, q);
+    if (nut){ nut.disabled = !!thieu; nut.textContent = 'Thanh toán ' + tien(tong); }
+    const w = $('#posWarn');
+    if (w){ w.textContent = thieu; w.style.display = thieu ? '' : 'none'; }
+  },
+
+  async posPick(id){
+    const c = await API.call('customer_get', {id});
+    const gifts = [];
+    c.rewards.forEach(p => p.pending.forEach(e => gifts.push(e.gift)));
+    if (c.bday && c.bday.pending) gifts.push('🎂 ' + c.bday.gift);
+    this.pos.cus = {id: c.customer.id, name: c.customer.name, phone: c.customer.phone, tier: c.tier.tier,
+                    cuts: c.stats.cuts, last_barber_id: c.last_barber_id, gifts};
+    /* Chọn sẵn thợ lượt trước — khách quen phần lớn ngồi lại ghế cũ. */
+    if (!this.pos.barber && (this.posData.barbers || []).some(b => b.id === c.last_barber_id)) this.pos.barber = c.last_barber_id;
+    this.drawPos();
+  },
+
+  async posSearch(){
+    const st = this.pos, q = st.q.trim(), so = q.replace(/\D/g, '');
+    if (!q){ st.rows = null; st.err = ''; return this.drawPosRes(); }
+    const chu = /[^\d\s.\-]/.test(q);
+    if (!chu && so.length < 4) return;
+    if (!chu && so.length > 4 && so.length < 10) return;
+    const luot = this._lp = (this._lp || 0) + 1;
+    try{
+      const r = await API.call('search', {q});
+      if (luot !== this._lp) return;
+      st.rows = r.rows; st.err = '';
+    }catch(e){ if (luot !== this._lp) return; st.rows = null; st.err = e.message; }
+    this.drawPosRes();
+  },
+
+  drawPosRes(){ const b = $('#posRes'); if (b) b.innerHTML = Views.posResults(this.pos); },
+
+  async posCheckout(el){
+    const st = this.pos;
+    this.posNums();
+    const q = this.quote();
+    const tong = q.total + st.tipN;
+    const cash = st.pay === 'cash' ? tong : st.pay === 'mix' ? st.cashPartN : 0;
+    el.disabled = true;
+    const r = await API.call('bill_create', {
+      customer_id: st.cus && !st.cus.walkin ? st.cus.id : 0,
+      barber_id: st.barber || 0,
+      items: st.lines.map(l => ({service_id: l.sid, qty: l.qty, price: Number(l.price) || undefined})),
+      promo_id: st.promo || 0, extra: API.isOwner() ? Number(String(st.extra).replace(/\D/g, '')) || 0 : 0,
+      tip: st.tipN, pay_cash: cash, pay_transfer: tong - cash, note: st.note,
+      expect_total: q.total, date: API.isOwner() ? st.date : undefined});
+    st.done = r;
+    st.change = st.pay === 'cash' && st.givenN > tong ? st.givenN - tong : 0;
+    if (r.new_rewards && r.new_rewards.length) toast('🎁 Khách vừa đạt quà: ' + r.new_rewards.map(x => x.gift).join(', '), 'ok');
+    else toast('Đã thanh toán', 'ok');
+    this.data.card = null;
+    window.scrollTo(0, 0);
+    this.drawPos();
+  },
+
+  /* In qua khung ẩn — app thêm ra màn hình chính thì cửa sổ bật lên bị chặn. */
+  printHtml(html){
+    let f = $('#printFrame');
+    if (f) f.remove();
+    f = document.createElement('iframe');
+    f.id = 'printFrame';
+    f.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+    document.body.appendChild(f);
+    f.contentDocument.open(); f.contentDocument.write(html); f.contentDocument.close();
+    setTimeout(() => { f.contentWindow.focus(); f.contentWindow.print(); }, 250);
+  },
+
+  findBill(id){
+    const ds = [].concat(this.pos && this.pos.done ? [this.pos.done.bill] : [],
+                         (this.data.day || {}).visits || [], (this.data.card || {}).visits || []);
+    return ds.find(v => v.id === id);
+  },
+
+  printPayroll(){
+    const d = this.data.payroll;
+    const dong = d.rows.map(t => `<tr><td>${esc(t.name)}</td><td>${t.bills}</td><td>${tien(t.base)}</td><td>${tien(t.wage)}</td>
+      <td>${tien(t.comm)}</td><td>${d.tip_included ? tien(t.tip) : '—'}</td><td>${t.adj ? tien(t.adj) : ''}</td><td><b>${tien(t.total)}</b></td></tr>
+      ${t.adjust.map(a => `<tr class="s"><td colspan="7">· ${esc(a.label)}</td><td>${tien(a.amount)}</td></tr>`).join('')}`).join('');
+    this.printHtml(`<!doctype html><html><head><meta charset="utf-8"><title>Bảng lương ${esc(d.month)}</title><style>
+      body{font:13px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:16px;color:#000}
+      table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:5px 8px;text-align:right}
+      td:first-child,th:first-child{text-align:left}.s td{border:0;color:#444;font-size:12px}h1{font-size:18px}
+    </style></head><body><h1>${esc(this.shop)} — Bảng lương tháng ${esc(d.month.slice(5))}/${esc(d.month.slice(0, 4))}</h1>
+      ${d.closed ? `<p>Đã chốt ${new Date(d.closed.at * 1000).toLocaleString('vi-VN')}</p>` : '<p>Tạm tính — chưa chốt</p>'}
+      <table><tr><th>Thợ</th><th>HĐ</th><th>Lương cứng</th><th>Tiền công lượt</th><th>Hoa hồng SP</th><th>Tip</th><th>Thưởng/trừ</th><th>Tổng nhận</th></tr>
+      ${dong}<tr><td colspan="7"><b>Tổng</b></td><td><b>${tien(d.rows.reduce((a, t) => a + t.total, 0))}</b></td></tr></table></body></html>`);
   },
 
   leftHtml(tu){
@@ -328,18 +525,100 @@ const App = {
           const so = this.look.q.replace(/\D/g, '');
           return this.push({name: 'newCus', pre: {phone: so.length >= 10 ? so : ''}});
         }
-        case 'pick': {
-          const sel = this.ui.sel;
-          if (sel.has(id)) sel.delete(id); else sel.set(id, '');
-          this.ui.justGot = [];
-          return this.drawCard();
+        /* ----- bán hàng ----- */
+        case 'sellFor': {
+          const c = this.data.card;
+          this.posReset();
+          this.pos.cus = {id: c.customer.id, name: c.customer.name, phone: c.customer.phone, tier: c.tier.tier,
+                          cuts: c.stats.cuts, last_barber_id: c.last_barber_id,
+                          gifts: [].concat(...c.rewards.map(p => p.pending.map(e => e.gift)), c.bday && c.bday.pending ? ['🎂 ' + c.bday.gift] : [])};
+          this.pos.barber = c.last_barber_id;
+          await this.go('pos');
+          /* Thợ lượt trước đã nghỉ thì bỏ chọn. */
+          if (!(this.posData.barbers || []).some(b => b.id === this.pos.barber)){ this.pos.barber = null; this.drawPos(); }
+          return;
         }
-        /* await ở đây: trả thẳng promise thì lỗi máy chủ (vd. "đã cắt hôm
-           nay rồi") lọt khỏi try, quầy không thấy báo gì, nút kẹt ở mờ. */
-        case 'addVisit': return await this.addVisit(el);
-        case 'pickBarber':
-          this.ui.barber = this.ui.barber === id ? null : id;
-          return this.drawCard();
+        case 'posPick':     return await this.posPick(id);
+        case 'posWalkin':   this.pos.cus = {walkin: true}; return this.drawPos();
+        case 'posCusClear': Object.assign(this.pos, {cus: null, q: '', rows: null, err: ''}); return this.drawPos();
+        case 'posNewCus': {
+          const so = this.pos.q.replace(/\D/g, '');
+          Object.assign(this.pos, {newCus: !this.pos.newCus, newPhone: so.length >= 10 ? so : ''});
+          this.drawPos();
+          const i = document.querySelector('#posNewCus [name=' + (this.pos.newPhone ? 'name' : 'phone') + ']');
+          if (i) i.focus();
+          return;
+        }
+        case 'posBarber':   this.pos.barber = this.pos.barber === id ? null : id; return this.drawPos();
+        case 'posAdd': {
+          const s = (this.posData.services || []).find(x => x.id === id);
+          const l = this.pos.lines.find(x => x.sid === id);
+          /* Dịch vụ giá cố định bấm lại là thêm số lượng; sản phẩm nhập giá
+             thì mỗi lần bấm một dòng — hai món giá khác nhau. */
+          if (l && s && s.price) l.qty++;
+          else this.pos.lines.push({sid: id, qty: 1, price: 0});
+          this.drawPos();
+          if (s && !s.price){ const ps = document.querySelectorAll('[data-pprice]'); if (ps.length) ps[ps.length - 1].focus(); }
+          return;
+        }
+        case 'posQty': {
+          const i = Number(el.dataset.i), l = this.pos.lines[i];
+          l.qty += Number(el.dataset.d);
+          if (l.qty <= 0) this.pos.lines.splice(i, 1);
+          return this.drawPos();
+        }
+        case 'posPay':
+          this.pos.pay = el.dataset.k;
+          this.drawPos();
+          if (this.pos.pay === 'cash' && $('#posGiven') && window.innerWidth >= 700) $('#posGiven').focus();
+          if (this.pos.pay === 'mix' && $('#posCashPart')) $('#posCashPart').focus();
+          return;
+        case 'posGivenSet': this.pos.given = el.dataset.v; return this.drawPos();
+        /* await: trả thẳng promise thì lỗi máy chủ lọt khỏi try, quầy không
+           thấy báo gì, nút kẹt ở mờ. */
+        case 'posCheckout': return await this.posCheckout(el);
+        case 'posReset':
+          if (this.pos.lines.length && !this.pos.done && !this.hoiLai(el, 'Xoá thật?')) return;
+          this.posReset();
+          await this.render();
+          return;
+        case 'printBill': {
+          const v = this.findBill(id);
+          if (v) this.printHtml(Views.receipt(v, this.shop));
+          return;
+        }
+
+        /* ----- lương ----- */
+        case 'payOpen':
+          this.pay.open = this.pay.open === id ? 0 : id;
+          $('#view').innerHTML = Views.payroll(this.data.payroll, this.pay);
+          return;
+        case 'payAdjDel': {
+          if (!this.hoiLai(el, 'Xoá?')) return;
+          this.data.payroll = await API.call('payroll_adjust_del', {id});
+          $('#view').innerHTML = Views.payroll(this.data.payroll, this.pay);
+          return;
+        }
+        case 'payClose': {
+          if (!this.hoiLai(el, 'Chốt thật? Bấm lần nữa')) return;
+          const m = this.data.payroll.month;
+          this.data.payroll = await API.call('payroll_close', {month: m, force: m >= this.today.slice(0, 7) ? 1 : 0});
+          toast('Đã chốt lương tháng ' + m.slice(5), 'ok');
+          $('#view').innerHTML = Views.payroll(this.data.payroll, this.pay);
+          return;
+        }
+        case 'payReopen': {
+          if (!this.hoiLai(el, 'Mở lại?')) return;
+          this.data.payroll = await API.call('payroll_reopen', {month: this.data.payroll.month});
+          $('#view').innerHTML = Views.payroll(this.data.payroll, this.pay);
+          return;
+        }
+        case 'payPrint': return this.printPayroll();
+        case 'promoDel': {
+          if (!this.hoiLai(el, 'Xoá?')) return;
+          $('#view').innerHTML = Views.promos((await API.call('promo_del', {id})).rows);
+          return;
+        }
         case 'merge': {
           if (!this.hoiLai(el, 'Chắc chưa? Bấm lần nữa')) return;
           el.disabled = true;
@@ -420,9 +699,9 @@ const App = {
           API.clear();
           /* Máy quầy dùng chung: chủ đăng xuất xong thì danh sách khách (có
              số điện thoại đầy đủ) không được nằm lại trong bộ nhớ trang. */
-          this.today = ''; this.data = {}; this.services = null; this.barbers = null;
+          this.today = ''; this.data = {}; this.services = null; this.barbers = null; this.pos = null; this.posData = {};
           this.look = {q: '', mode: 'num', rows: null, err: ''};
-          return this.go('lookup');
+          return this.go('pos');
 
         /* danh sách khách */
         case 'cf': {
@@ -468,7 +747,7 @@ const App = {
         case 'tierAdd': {
           const ts = this.data.tierEdit, cuoi = ts[ts.length - 1] || {};
           ts.push({id: 0, name: 'Hạng mới', color: '#7a5cff', min_cuts: (Number(cuoi.min_cuts) || 0) + 10,
-                   min_spend: (Number(cuoi.min_spend) || 0) + 2000000, perks: ''});
+                   min_spend: (Number(cuoi.min_spend) || 0) + 2000000, perks: '', disc_pct: (Number(cuoi.disc_pct) || 0) + 5});
           return this.drawTiers();
         }
         case 'tierDel': this.data.tierEdit.splice(Number(el.dataset.i), 1); return this.drawTiers();
@@ -481,7 +760,7 @@ const App = {
 
         /* dịch vụ */
         case 'svcAdd':
-          this.data.svcEdit.push({id: 0, name: '', kind: 'cut', price: 0, kv_codes: '', active: 1});
+          this.data.svcEdit.push({id: 0, name: '', kind: 'cut', price: 0, kv_codes: '', active: 1, wage: 0, comm_pct: 0, discountable: 1});
           return $('#view').innerHTML = Views.services(this.data.svcEdit);
         case 'svcUp': {
           const i = Number(el.dataset.i), a = this.data.svcEdit;
@@ -498,7 +777,7 @@ const App = {
 
         /* thợ cắt */
         case 'barberAdd':
-          this.data.barberEdit.push({id: 0, name: '', kv_name: '', active: 1});
+          this.data.barberEdit.push({id: 0, name: '', kv_name: '', active: 1, base_salary: 0});
           return $('#view').innerHTML = Views.barbers(this.data.barberEdit);
         case 'saveBarbers': {
           el.disabled = true;
@@ -519,29 +798,6 @@ const App = {
       toast(err.message, 'bad');
       if (el.isConnected) el.disabled = false;
     }
-  },
-
-  async addVisit(el){
-    const items = [];
-    for (const [sid] of this.ui.sel){
-      const inp = document.querySelector(`[data-price="${sid}"]`);
-      items.push({service_id: sid, price: inp ? Number(inp.value.replace(/\D/g, '')) : undefined});
-    }
-    if (!items.length) return;
-    el.disabled = true;
-    const d = $('#visitDate');
-    const r = await API.call('visit_add', Object.assign({customer_id: this.data.card.customer.id, items,
-                                                         barber_id: this.ui.barber || 0},
-                                                        d && d.value ? {date: d.value} : {}));
-    this.data.card = r;
-    this.ui.sel = new Map();
-    this.ui.justGot = r.new_rewards || [];
-    if (this.ui.justGot.length){
-      toast('🎁 Khách vừa đạt quà: ' + this.ui.justGot.map(x => x.gift).join(', '), 'ok');
-      window.scrollTo(0, 0);
-    } else toast('Đã ghi lượt', 'ok');
-    this.drawCard();
-    this.refreshLeft();
   },
 
   async changeBarber(vid, bid){
@@ -610,7 +866,7 @@ const App = {
   onKey(e){
     const dangGo = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target || {}).tagName || '');
     if (e.key === '/' && !dangGo){
-      const o = $('#q') || $('#cusQ');
+      const o = $('#q') || $('#cusQ') || $('#posQ');
       if (o){ e.preventDefault(); o.focus(); o.select(); }
       return;
     }
@@ -659,11 +915,24 @@ const App = {
       this._tc = setTimeout(() => this.drawCustomers(), 200);
       return;
     }
-    if (t.dataset.price){
-      this.ui.sel.set(Number(t.dataset.price), t.value);
-      const b = document.querySelector('[data-act="addVisit"]');
-      if (b) b.textContent = 'Ghi lượt · ' + tien(Views.tongChon(Object.assign({services: this.services}, this.ui)));
+    if (t.id === 'posQ'){
+      this.pos.q = t.value;
+      clearTimeout(this._tp);
+      const so = t.value.replace(/\D/g, '');
+      if (/[^\d\s.\-]/.test(t.value)) this._tp = setTimeout(() => this.posSearch(), 300);
+      else if (so.length === 4 || so.length >= 10 || !so) this.posSearch();
       return;
+    }
+    if (this.pos && t.closest && t.closest('.poswrap')){
+      if (t.dataset.money !== undefined) this.dinhDangTien(t);
+      if (t.dataset.pprice !== undefined){
+        this.pos.lines[Number(t.dataset.pprice)].price = Number(t.value.replace(/\D/g, '')) || 0;
+        /* Giá đổi thì giảm giá và thành tiền từng dòng đổi theo — vẽ lại khi
+           rời ô (change), lúc đang gõ chỉ cập nhật tổng. */
+      }
+      const k = {posTip: 'tip', posGiven: 'given', posCashPart: 'cashPart', posExtra: 'extra', posNote: 'note'}[t.id];
+      if (k) this.pos[k] = t.value;
+      return this.posLive();
     }
     this.bindField(t);
   },
@@ -672,7 +941,14 @@ const App = {
     const t = e.target;
     if (t.id === 'kvFile' && t.files.length) return this.importFiles(t.files);
     if (t.id === 'dayPick'){ this.cur.date = t.value; return this.render(); }
-    if (t.id === 'visitDate'){ this.ui.date = t.value; return; }
+    if (t.id === 'payMonth' && t.value){ this.cur.month = t.value; this.pay.open = 0; return this.render(); }
+    if (t.id === 'payTip'){
+      return API.call('setting_save', {key: 'payroll_tip', value: t.checked ? 1 : 0})
+        .then(() => this.render()).catch(e => toast(e.message, 'bad'));
+    }
+    if (t.id === 'posPromo'){ this.pos.promo = Number(t.value); return this.drawPos(); }
+    if (t.id === 'posDate'){ this.pos.date = t.value; return; }
+
     if (t.dataset.vb) return this.changeBarber(Number(t.dataset.vb), Number(t.value));
     this.bindField(t);
   },
@@ -688,16 +964,17 @@ const App = {
       this.data.prog.steps[Number(t.dataset.step)][t.dataset.f] = val;
     } else if (t.dataset.tier){
       const row = this.data.tierEdit[Number(t.dataset.tier)];
-      row[t.dataset.f] = /^min_/.test(t.dataset.f) ? Number(String(val).replace(/\D/g, '')) || 0 : val;
+      row[t.dataset.f] = /^min_|^disc_pct$/.test(t.dataset.f) ? Number(String(val).replace(/\D/g, '')) || 0 : val;
       if (/^min_/.test(t.dataset.f)){
         const dem = this.tierCounts();
         dem.forEach((n, i) => { const b = document.getElementById('tc' + i); if (b) b.textContent = n + ' khách'; });
       }
     } else if (t.dataset.bb){
-      this.data.barberEdit[Number(t.dataset.bb)][t.dataset.f] = val;
+      this.data.barberEdit[Number(t.dataset.bb)][t.dataset.f] = t.dataset.f === 'base_salary' ? Number(String(val).replace(/\D/g, '')) || 0 : val;
     } else if (t.dataset.svc){
       const row = this.data.svcEdit[Number(t.dataset.svc)];
-      row[t.dataset.f] = t.dataset.f === 'price' ? Number(String(val).replace(/\D/g, '')) || 0 : val;
+      row[t.dataset.f] = t.dataset.f === 'price' || t.dataset.f === 'wage' ? Number(String(val).replace(/\D/g, '')) || 0
+        : t.dataset.f === 'comm_pct' ? Number(String(val).replace(',', '.')) || 0 : val;
     }
   },
 
@@ -731,7 +1008,7 @@ const App = {
         const r = await API.call('login', {username: v.username.trim(), password: v.password.trim()});
         API.save(r.token, r.user);
         this.today = '';
-        return this.go(r.user.role === 'owner' ? 'dash' : 'lookup');
+        return this.go(r.user.role === 'owner' ? 'dash' : 'pos');
       }
       if (f.id === 'newCusForm'){
         try{
@@ -749,6 +1026,28 @@ const App = {
           }
           throw err;
         }
+      }
+      if (f.id === 'posNewCus'){
+        let id;
+        try{ id = (await API.call('customer_create', {name: v.name, phone: v.phone})).id; toast('Đã thêm khách', 'ok'); }
+        catch(err){ if (err.code !== 'exists') throw err; id = err.data.id; toast(err.message, ''); }
+        this.pos.newCus = false;
+        return await this.posPick(id);
+      }
+      if (f.id === 'payAdjForm'){
+        const so = Number(String(v.amount).replace(/\D/g, '')) * Number(v.sign);
+        this.data.payroll = await API.call('payroll_adjust_add', {month: this.data.payroll.month,
+                                           barber_id: Number(f.dataset.barber), label: v.label, amount: so});
+        toast('Đã thêm', 'ok');
+        $('#view').innerHTML = Views.payroll(this.data.payroll, this.pay);
+        return;
+      }
+      if (f.dataset.promo !== undefined){
+        const r = await API.call('promo_save', Object.assign({}, v, {id: Number(f.dataset.promo),
+                                  value: Number(String(v.value).replace(/\D/g, '')), active: Number(v.active)}));
+        toast('Đã lưu khuyến mãi', 'ok');
+        $('#view').innerHTML = Views.promos(r.rows);
+        return;
       }
       if (f.id === 'cusEditForm'){
         this.data.card = await API.call('customer_update', Object.assign({id: this.data.card.customer.id}, v));

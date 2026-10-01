@@ -7,7 +7,9 @@
    Kết quả là danh sách HOÁ ĐƠN (gộp các dòng hàng cùng mã hoá đơn), dạng
    rút gọn để gửi lên máy chủ:
      {c: mã HĐ, t: 'YYYY-MM-DD HH:MM', p: SĐT, n: tên khách, k: mã KH,
-      a: khách cần trả, i: [[mã hàng, tên hàng, số lượng, thành tiền], …]}
+      a: khách cần trả, x: thu khác (tip), m: tiền mặt, q: chuyển khoản + thẻ + ví,
+      b: người bán (thợ),
+      i: [[mã hàng, tên hàng, số lượng, thành tiền, đơn giá, giảm giá dòng], …]}
 
    Chạy được cả trong Node (để thử bằng tay) vì chỉ dùng Blob, Response và
    DecompressionStream.                                                   */
@@ -161,7 +163,9 @@ const KiotViet = {
       code: 'ma hoa don', time: 'thoi gian', kcode: 'ma khach hang', name: 'ten khach hang',
       phone: 'dien thoai', pay: 'khach can tra', status: 'trang thai',
       icode: 'ma hang', iname: 'ten hang', qty: 'so luong', total: 'thanh tien',
-      seller: 'nguoi ban'     // thợ cắt — KiotViet gọi là "Người bán"
+      seller: 'nguoi ban',    // thợ cắt — KiotViet gọi là "Người bán"
+      other: 'thu khac', cash: 'tien mat', card: 'the', wallet: 'vi', transfer: 'chuyen khoan',
+      unit: 'don gia', ldisc: 'giam gia'
     };
 
     /* Lấy trang tính nào có cột "Mã hóa đơn" — tên tệp trang tính bên
@@ -201,15 +205,17 @@ const KiotViet = {
       if (!code) continue;
       lines++;
       if (col.status != null && this.fold(r[col.status]).includes('huy')){ huy++; continue; }
+      const num = k => k != null ? Number(r[k]) || 0 : 0;
       let h = byCode.get(code);
       if (!h){
         h = {c: code, t: this.when(r[col.time]), p: this.phone(r[col.phone]),
              n: String(r[col.name] || '').trim(), k: String(r[col.kcode] || '').trim(),
-             a: Number(r[col.pay]) || 0, b: col.seller != null ? String(r[col.seller] || '').trim() : '', i: []};
+             a: Number(r[col.pay]) || 0, b: col.seller != null ? String(r[col.seller] || '').trim() : '',
+             x: num(col.other), m: num(col.cash), q: num(col.transfer) + num(col.card) + num(col.wallet), i: []};
         byCode.set(code, h);
       }
       h.i.push([String(r[col.icode] || '').trim(), String(r[col.iname] || '').trim(),
-                Number(r[col.qty]) || 1, Number(r[col.total]) || 0]);
+                Number(r[col.qty]) || 1, Number(r[col.total]) || 0, num(col.unit), num(col.ldisc)]);
     }
 
     const invoices = [...byCode.values()].filter(h => h.t);

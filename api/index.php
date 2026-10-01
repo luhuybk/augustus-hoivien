@@ -318,45 +318,98 @@ case 'customer_update': {
   out(['ok' => true] + customerCard($id, $u));
 }
 
-/* ===== ghi lượt ===== */
+/* ===== bán hàng ===== */
 
-case 'visit_add': {
+/* Những gì màn Bán hàng cần, gọi một lần: dịch vụ, thợ, khuyến mãi đang
+   chạy. Quầy không cần biết tiền công của thợ. */
+case 'pos_init': {
   $u = mhRequireUser();
   $owner = mhIsOwner($u);
-  $cid = (int)inp('customer_id', 0);
-  if (!mhCustomerRow($cid)) out(['ok' => false, 'error' => 'Không tìm thấy khách.'], 404);
+  $svc = array_map(function ($s) use ($owner) {
+    if (!$owner) unset($s['wage'], $s['comm_pct'], $s['kv_codes']);
+    return $s;
+  }, mhServices(!$owner));
+  out(['ok' => true, 'services' => $svc,
+       'barbers' => array_map(function ($b) { return ['id' => $b['id'], 'name' => $b['name']]; }, mhBarbers(true)),
+       'promos' => array_map(function ($p) { return ['id' => $p['id'], 'name' => $p['name'], 'kind' => $p['kind'], 'value' => $p['value']]; },
+                             mhPromos(true)),
+       'today' => mhToday()]);
+}
+
+/* Tạo hoá đơn. Giá, giảm giá đều tính lại ở máy chủ từ bảng dịch vụ —
+   quầy chỉ gửi "dịch vụ nào, mấy cái"; tiền gửi lên chỉ để đối chiếu. */
+case 'bill_create': {
+  $u = mhRequireUser();
+  $owner = mhIsOwner($u);
+  $cid = (int)inp('customer_id', 0) ?: null;
+  $c = null;
+  if ($cid && !($c = mhCustomerRow($cid))) out(['ok' => false, 'error' => 'Không tìm thấy khách.'], 404);
 
   $items = inp('items', []);
   if (!is_array($items) || !$items) out(['ok' => false, 'error' => 'Chọn ít nhất một dịch vụ.'], 400);
+  if (count($items) > 30) out(['ok' => false, 'error' => 'Hoá đơn dài quá.'], 400);
 
   /* Ngày luôn là hôm nay theo máy chủ. Chỉ chủ được ghi bù ngày cũ. */
   $date = mhToday();
   if ($owner && validDate(inp('date')) && inp('date') <= mhToday()) $date = inp('date');
 
   $sv = [];
-  foreach (db()->query('SELECT * FROM services')->fetchAll() as $s) $sv[(int)$s['id']] = $s;
-
-  $rows = []; $amount = 0; $coCat = false;
+  foreach (mhServices(false) as $s) $sv[$s['id']] = $s;
+  $lines = []; $coCat = false;
   foreach ($items as $it) {
     $s = $sv[(int)($it['service_id'] ?? 0)] ?? null;
     if (!$s || (!$s['active'] && !$owner)) out(['ok' => false, 'error' => 'Có dịch vụ không còn trong danh sách. Tải lại trang.'], 400);
-    $price = (int)$s['price'];
-    /* Giá 0 = sản phẩm, giá thay đổi theo món nên quầy tự nhập. Có trần
-       để một lần gõ thừa ba số 0 không đẩy khách lên hạng Đen. */
-    if ($price === 0) {
-      $price = (int)($it['price'] ?? 0);
-      if ($price < 1000 || $price > 10000000)
+    $qty = max(1, min(99, (int)($it['qty'] ?? 1)));
+    $unit = $s['price'];
+    /* Giá 0 = sản phẩm, giá theo món nên quầy tự nhập. Có trần để một lần
+       gõ thừa ba số 0 không đẩy khách lên hạng Đen. */
+    if ($unit === 0) {
+      $unit = (int)($it['price'] ?? 0);
+      if ($unit < 1000 || $unit > 10000000)
         out(['ok' => false, 'error' => 'Nhập giá cho "' . $s['name'] . '" (từ 1.000đ đến 10 triệu).'], 400);
     }
-    $rows[] = [(int)$s['id'], $s['name'], $s['kind'], $price];
-    $amount += $price;
+    $lines[] = ['svc' => $s, 'qty' => $qty, 'unit' => $unit];
     if ($s['kind'] === 'cut') $coCat = true;
   }
 
-  /* Một người không cắt tóc hai lần một ngày. Chặn ở đây là chặn luôn
-     kiểu bấm hai lần cho chắc, hay cộng thêm lượt để khách quen sớm có
-     quà. Thật sự có lần hai thì chủ ghi tay được. */
-  if ($coCat && !$owner) {
+  /* Thợ: quầy bắt buộc chọn khi quán đã khai thợ — lương tính theo đây. */
+  $bid = (int)inp('barber_id', 0) ?: null;
+  if ($bid !== null && !in_array($bid, array_column(mhBarbers(), 'id'), true))
+    out(['ok' => false, 'error' => 'Thợ này không còn trong danh sách. Tải lại trang.'], 400);
+  if ($bid === null && mhBarbers(true) && !$owner)
+    out(['ok' => false, 'error' => 'Chọn thợ cho hoá đơn này.'], 400);
+
+  /* Giảm theo hạng: hạng TRƯỚC hoá đơn này. */
+  $tierPct = 0; $tierName = '';
+  if ($c) {
+    $stt = mhStats($cid)[$cid];
+    $t = mhTierOf($stt['cuts'], $stt['spend'], mhTiers())['tier'];
+    if ($t) { $tierPct = $t['disc_pct']; $tierName = $t['name']; }
+  }
+  $promo = null;
+  if ($pid = (int)inp('promo_id', 0)) {
+    foreach (mhPromos(true) as $p) if ($p['id'] === $pid) $promo = $p;
+    if (!$promo) out(['ok' => false, 'error' => 'Khuyến mãi này đã hết hạn hoặc bị tắt. Tải lại trang.'], 400);
+  }
+  $extra = $owner ? max(0, (int)inp('extra', 0)) : 0;
+  $q = mhQuote($lines, $tierPct, $tierName, $promo, $extra);
+
+  $expect = inp('expect_total');
+  if ($expect !== null && (int)$expect !== $q['total'])
+    out(['ok' => false, 'code' => 'price_changed', 'quote' => $q,
+         'error' => 'Tổng tiền máy chủ tính ra ' . number_format($q['total'], 0, ',', '.') . 'đ, khác số trên màn hình. '
+                  . 'Có thể giá hoặc hạng khách vừa đổi — tải lại trang rồi làm lại.'], 409);
+
+  $tip = max(0, min(5000000, (int)inp('tip', 0)));
+  $cash = max(0, (int)inp('pay_cash', 0));
+  $ck   = max(0, (int)inp('pay_transfer', 0));
+  if ($cash + $ck !== $q['total'] + $tip)
+    out(['ok' => false, 'error' => 'Tiền mặt + chuyển khoản phải bằng ' . number_format($q['total'] + $tip, 0, ',', '.') . 'đ.'], 400);
+
+  /* Một người không cắt tóc hai lần một ngày — chặn bấm hai lần cho chắc,
+     hay cộng thêm lượt cho khách quen sớm có quà. Thật sự có lần hai thì
+     chủ ghi. */
+  if ($c && $coCat && !$owner) {
     $st = db()->prepare("SELECT v.visit_time FROM visits v
                           WHERE v.customer_id = ? AND v.visit_date = ? AND v.void_at IS NULL
                             AND EXISTS (SELECT 1 FROM visit_items i WHERE i.visit_id = v.id AND i.kind = 'cut')
@@ -364,35 +417,39 @@ case 'visit_add': {
     $st->execute([$cid, $date]);
     $gio = $st->fetchColumn();
     if ($gio !== false)
-      out(['ok' => false, 'error' => 'Khách này đã được ghi một lượt cắt hôm nay'
+      out(['ok' => false, 'error' => 'Khách này đã có hoá đơn cắt tóc hôm nay'
            . ($gio ? ' lúc ' . $gio : '') . '. Nếu thật sự cắt lần hai, nhờ chủ quán ghi thêm.'], 409);
   }
 
-  /* Thợ cắt: quầy bắt buộc chọn khi quán đã khai thợ — dữ liệu "khách
-     này hay cắt với ai" chỉ có giá trị khi lượt nào cũng có. */
-  $bid = (int)inp('barber_id', 0) ?: null;
-  $dsTho = mhBarbers(true);
-  if ($bid !== null && !in_array($bid, array_column(mhBarbers(), 'id'), true))
-    out(['ok' => false, 'error' => 'Thợ này không còn trong danh sách. Tải lại trang.'], 400);
-  if ($bid === null && $dsTho && !$owner)
-    out(['ok' => false, 'error' => 'Chọn thợ cắt cho lượt này.'], 400);
-
-  $truoc = pendingKeys($cid);
-
+  $truoc = $c ? pendingKeys($cid) : [];
   $pdo = db();
   $pdo->beginTransaction();
-  $pdo->prepare('INSERT INTO visits (customer_id, visit_date, visit_time, amount, source, note, barber_id, created_at, created_by)
-                 VALUES (?,?,?,?,?,?,?,?,?)')
-      ->execute([$cid, $date, $date === mhToday() ? date('H:i') : '', $amount,
-                 $owner ? 'owner' : 'counter', trim((string)inp('note', '')), $bid, time(), $u['id']]);
+  $pdo->prepare('INSERT INTO visits (customer_id, visit_date, visit_time, amount, subtotal, discount, disc_note, tip,
+                                     pay_cash, pay_transfer, source, note, barber_id, created_at, created_by)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      ->execute([$cid, $date, $date === mhToday() ? date('H:i') : '', $q['total'], $q['subtotal'], $q['discount'],
+                 $q['note'], $tip, $cash, $ck, $owner ? 'owner' : 'counter', mb_substr(trim((string)inp('note', '')), 0, 300),
+                 $bid, time(), $u['id']]);
   $vid = (int)$pdo->lastInsertId();
-  $ins = $pdo->prepare('INSERT INTO visit_items (visit_id, service_id, name, kind, qty, price) VALUES (?,?,?,?,1,?)');
-  foreach ($rows as $r) $ins->execute([$vid, $r[0], $r[1], $r[2], $r[3]]);
+  $ins = $pdo->prepare('INSERT INTO visit_items (visit_id, service_id, name, kind, qty, price, list_price, disc) VALUES (?,?,?,?,?,?,?,?)');
+  foreach ($lines as $i => $l)
+    $ins->execute([$vid, $l['svc']['id'], $l['svc']['name'], $l['svc']['kind'], $l['qty'],
+                   $q['lines'][$i]['net'], $l['unit'], $q['lines'][$i]['disc']]);
   $pdo->commit();
 
-  $moi = array_values(array_diff_key(pendingKeys($cid), $truoc));
-  mhAudit($u['id'], 'visit_add', "#$vid khách #$cid · " . implode(', ', array_column($rows, 1)) . ' · ' . $amount);
-  out(['ok' => true, 'visit_id' => $vid, 'new_rewards' => $moi] + customerCard($cid, $u));
+  $moi = $c ? array_values(array_diff_key(pendingKeys($cid), $truoc)) : [];
+  mhAudit($u['id'], 'bill_create', "#$vid " . ($c ? "khách #$cid" : 'khách lẻ') . ' · '
+          . implode(', ', array_map(function ($l) { return $l['svc']['name'] . ($l['qty'] > 1 ? ' x' . $l['qty'] : ''); }, $lines))
+          . ' · ' . $q['total'] . ($tip ? " + tip $tip" : '') . ' · TM ' . $cash . ' / CK ' . $ck);
+  $bill = mhVisitList('v.id = ?', [$vid], 1)[0];
+  if (!$owner) $bill['customer_phone'] = mhMask((string)$bill['customer_phone']);
+  $choQua = 0;
+  if ($c) {
+    $choQua = count(pendingKeys($cid));
+    $stt = mhStats($cid)[$cid];
+    if (mhBdayState($c, mhTierOf($stt['cuts'], $stt['spend'], mhTiers())['tier'], isset(mhBdayGivenThisYear()[$cid]))['pending']) $choQua++;
+  }
+  out(['ok' => true, 'bill' => $bill, 'new_rewards' => $moi, 'pending' => $choQua]);
 }
 
 /* Huỷ lượt: quầy chỉ huỷ được lượt chính mình vừa ghi, trong vài phút.
@@ -416,8 +473,8 @@ case 'visit_void': {
   if ($reason === '') out(['ok' => false, 'error' => 'Ghi lý do huỷ.'], 400);
   db()->prepare('UPDATE visits SET void_at = ?, void_by = ?, void_reason = ? WHERE id = ?')
       ->execute([time(), $u['id'], $reason, $id]);
-  mhAudit($u['id'], 'visit_void', "#$id khách #" . $v['customer_id'] . ' · ' . $reason);
-  out(['ok' => true] + customerCard((int)$v['customer_id'], $u));
+  mhAudit($u['id'], 'visit_void', "#$id khách #" . ($v['customer_id'] ?? 'lẻ') . ' · ' . $reason);
+  out(['ok' => true] + ($v['customer_id'] !== null ? customerCard((int)$v['customer_id'], $u) : []));
 }
 
 /* Đổi thợ của một lượt đã ghi (chọn nhầm). Cùng luật với huỷ lượt: quầy
@@ -437,7 +494,7 @@ case 'visit_barber': {
     out(['ok' => false, 'error' => 'Không có thợ này.'], 400);
   db()->prepare('UPDATE visits SET barber_id = ? WHERE id = ?')->execute([$bid, $id]);
   mhAudit($u['id'], 'visit_barber', "#$id → thợ #" . ($bid ?? 0));
-  out(['ok' => true] + customerCard((int)$v['customer_id'], $u));
+  out(['ok' => true] + ($v['customer_id'] !== null ? customerCard((int)$v['customer_id'], $u) : []));
 }
 
 /* Gộp khách trùng: mọi lượt, quà đã trao, số phụ của khách "from" chuyển
@@ -501,7 +558,8 @@ case 'alias_del': {
 
 case 'barbers': {
   $u = mhRequireUser();
-  if (!mhIsOwner($u)) out(['ok' => true, 'rows' => mhBarbers(true)]);
+  if (!mhIsOwner($u))
+    out(['ok' => true, 'rows' => array_map(function ($b) { return ['id' => $b['id'], 'name' => $b['name'], 'active' => 1]; }, mhBarbers(true))]);
   /* Chủ xem kèm số liệu từng thợ: tổng lượt, số khách, và số khách coi
      thợ đó là thợ chính (khách quen — từ 3 lượt trở lên). */
   $rows = mhBarbers();
@@ -529,14 +587,15 @@ case 'barbers_save': {
   if (!is_array($rows)) out(['ok' => false, 'error' => 'Dữ liệu không đúng.'], 400);
   $pdo = db();
   $pdo->beginTransaction();
-  $up  = $pdo->prepare('UPDATE barbers SET name = ?, kv_name = ?, active = ?, sort = ? WHERE id = ?');
-  $ins = $pdo->prepare('INSERT INTO barbers (name, kv_name, active, sort, created_at) VALUES (?,?,?,?,?)');
+  $up  = $pdo->prepare('UPDATE barbers SET name = ?, kv_name = ?, active = ?, sort = ?, base_salary = ? WHERE id = ?');
+  $ins = $pdo->prepare('INSERT INTO barbers (name, kv_name, active, sort, base_salary, created_at) VALUES (?,?,?,?,?,?)');
   foreach (array_values($rows) as $i => $r) {
     $ten = trim((string)($r['name'] ?? ''));
     if ($ten === '') out(['ok' => false, 'error' => 'Thợ thứ ' . ($i + 1) . ' chưa có tên.'], 400);
     $kv = mhCleanKvName((string)($r['kv_name'] ?? ''));
-    if (!empty($r['id'])) $up->execute([$ten, $kv, !empty($r['active']) ? 1 : 0, $i + 1, (int)$r['id']]);
-    else $ins->execute([$ten, $kv, !empty($r['active']) ? 1 : 0, $i + 1, time()]);
+    $luong = max(0, (int)($r['base_salary'] ?? 0));
+    if (!empty($r['id'])) $up->execute([$ten, $kv, !empty($r['active']) ? 1 : 0, $i + 1, $luong, (int)$r['id']]);
+    else $ins->execute([$ten, $kv, !empty($r['active']) ? 1 : 0, $i + 1, $luong, time()]);
   }
   $pdo->commit();
   mhAudit($u['id'], 'barbers_save', count($rows) . ' thợ');
@@ -624,7 +683,7 @@ case 'day': {
   foreach ($visits as &$v) {
     $v['can_void'] = $v['void_at'] === null && ($owner
       || ($v['source'] === 'counter' && $v['created_by'] === $u['id'] && $v['created_at'] >= $han));
-    $v['customer_phone'] = $owner ? $v['customer_phone'] : mhMask($v['customer_phone']);
+    $v['customer_phone'] = $owner ? $v['customer_phone'] : mhMask((string)$v['customer_phone']);
   }
   unset($v);
   $st = db()->prepare("SELECT g.gift, g.given_at, c.id AS cid, c.name, u.name AS by_name
@@ -636,17 +695,16 @@ case 'day': {
     return ['gift' => $g['gift'], 'time' => date('H:i', (int)$g['given_at']),
             'customer_id' => (int)$g['cid'], 'name' => $g['name'], 'by' => $g['by_name']];
   }, $st->fetchAll());
-  out(['ok' => true, 'date' => $date, 'visits' => $visits, 'gifts' => $gifts]);
+  out(['ok' => true, 'date' => $date, 'visits' => $visits, 'gifts' => $gifts,
+       'shop' => MH_SHOP_NAME, 'tip_included' => mhSetting('payroll_tip', '1') === '1']);
 }
 
 /* ===== danh mục ===== */
 
 case 'services': {
   $u = mhRequireUser();
-  $rows = db()->query('SELECT * FROM services' . (mhIsOwner($u) ? '' : ' WHERE active = 1')
-                    . ' ORDER BY sort, id')->fetchAll();
-  foreach ($rows as &$s) { $s['id'] = (int)$s['id']; $s['price'] = (int)$s['price'];
-                           $s['active'] = (int)$s['active']; $s['sort'] = (int)$s['sort']; }
+  $rows = mhServices(!mhIsOwner($u));
+  if (!mhIsOwner($u)) foreach ($rows as &$s) unset($s['wage'], $s['comm_pct']);
   unset($s);
   out(['ok' => true, 'rows' => $rows, 'kinds' => MH_KINDS]);
 }
@@ -678,13 +736,14 @@ case 'services_save': {
   $pdo = db();
   $pdo->beginTransaction();
   $giu = [];
-  $up  = $pdo->prepare('UPDATE services SET name=?, kind=?, price=?, kv_codes=?, active=?, sort=? WHERE id=?');
-  $ins = $pdo->prepare('INSERT INTO services (name, kind, price, kv_codes, active, sort) VALUES (?,?,?,?,?,?)');
+  $up  = $pdo->prepare('UPDATE services SET name=?, kind=?, price=?, kv_codes=?, active=?, sort=?, wage=?, comm_pct=?, discountable=? WHERE id=?');
+  $ins = $pdo->prepare('INSERT INTO services (name, kind, price, kv_codes, active, sort, wage, comm_pct, discountable) VALUES (?,?,?,?,?,?,?,?,?)');
   foreach (array_values($rows) as $i => $r) {
     $codes = implode(',', array_filter(array_map(function ($c) { return trim($c); },
                                                  explode(',', (string)($r['kv_codes'] ?? '')))));
     $vals = [trim((string)$r['name']), $r['kind'], max(0, (int)($r['price'] ?? 0)), $codes,
-             !empty($r['active']) ? 1 : 0, $i + 1];
+             !empty($r['active']) ? 1 : 0, $i + 1, max(0, (int)($r['wage'] ?? 0)),
+             max(0, min(100, round((float)($r['comm_pct'] ?? 0), 2))), !empty($r['discountable']) ? 1 : 0];
     if (!empty($r['id'])) { $up->execute(array_merge($vals, [(int)$r['id']])); $giu[] = (int)$r['id']; }
     else { $ins->execute($vals); $giu[] = (int)$pdo->lastInsertId(); }
   }
@@ -719,13 +778,13 @@ case 'tiers_save': {
   $pdo = db();
   $pdo->beginTransaction();
   $giu = [];
-  $up  = $pdo->prepare('UPDATE tiers SET name=?, color=?, min_cuts=?, min_spend=?, perks=?, sort=?, bday_gift=? WHERE id=?');
-  $ins = $pdo->prepare('INSERT INTO tiers (name, color, min_cuts, min_spend, perks, sort, bday_gift) VALUES (?,?,?,?,?,?,?)');
+  $up  = $pdo->prepare('UPDATE tiers SET name=?, color=?, min_cuts=?, min_spend=?, perks=?, sort=?, bday_gift=?, disc_pct=? WHERE id=?');
+  $ins = $pdo->prepare('INSERT INTO tiers (name, color, min_cuts, min_spend, perks, sort, bday_gift, disc_pct) VALUES (?,?,?,?,?,?,?,?)');
   foreach (array_values($rows) as $i => $r) {
     $color = preg_match('/^#[0-9a-fA-F]{6}$/', (string)($r['color'] ?? '')) ? $r['color'] : '#888888';
     $vals = [trim((string)$r['name']), $color, max(0, (int)($r['min_cuts'] ?? 0)),
              max(0, (int)($r['min_spend'] ?? 0)), trim((string)($r['perks'] ?? '')), $i + 1,
-             trim((string)($r['bday_gift'] ?? ''))];
+             trim((string)($r['bday_gift'] ?? '')), max(0, min(100, (int)($r['disc_pct'] ?? 0)))];
     if (!empty($r['id'])) { $up->execute(array_merge($vals, [(int)$r['id']])); $giu[] = (int)$r['id']; }
     else { $ins->execute($vals); $giu[] = (int)$pdo->lastInsertId(); }
   }
@@ -810,7 +869,9 @@ case 'dashboard': {
 
   $q = function (string $sql, array $a = []) { $st = db()->prepare($sql); $st->execute($a); return $st->fetch(); };
   $hom = $q('SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM visits WHERE void_at IS NULL AND visit_date = ?', [$today]);
-  $thg = $q('SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM visits WHERE void_at IS NULL AND visit_date LIKE ?', [$month . '-%']);
+  $thg = $q('SELECT COUNT(*) n, COALESCE(SUM(amount),0) s, COALESCE(SUM(tip),0) t, COALESCE(SUM(discount),0) d,
+                    COALESCE(SUM(pay_cash),0) cash, COALESCE(SUM(pay_transfer),0) ck
+               FROM visits WHERE void_at IS NULL AND visit_date LIKE ?', [$month . '-%']);
   $huy = $q('SELECT COUNT(*) n FROM visits WHERE void_at >= ?', [strtotime($month . '-01')]);
   $moi = $q('SELECT COUNT(*) n FROM customers WHERE created_at >= ?', [strtotime($month . '-01')]);
   $qua = $q('SELECT COUNT(*) n FROM rewards_given WHERE given_at >= ?', [strtotime($month . '-01')]);
@@ -868,6 +929,7 @@ case 'dashboard': {
        'no_barber' => (int)$khongTho['n'],
        'today' => ['visits' => (int)$hom['n'], 'amount' => (int)$hom['s']],
        'month' => ['visits' => (int)$thg['n'], 'amount' => (int)$thg['s'], 'voided' => (int)$huy['n'],
+                   'tip' => (int)$thg['t'], 'discount' => (int)$thg['d'], 'cash' => (int)$thg['cash'], 'transfer' => (int)$thg['ck'],
                    'new_customers' => (int)$moi['n'], 'gifts_given' => (int)$qua['n']],
        'customers' => count($all),
        'tiers' => array_map(function ($t) use ($tierCount) {
@@ -880,9 +942,12 @@ case 'dashboard': {
 /* ===== nhập file KiotViet =====
 
    Trình duyệt đã đọc file Excel và gom thành từng hoá đơn:
-     {c: mã HĐ, t: 'YYYY-MM-DD HH:MM', p: SĐT, n: tên, k: mã KH, a: tiền, i: [[mã hàng, tên, SL, thành tiền]]}
+     {c: mã HĐ, t: 'YYYY-MM-DD HH:MM', p: SĐT, n: tên, k: mã KH, a: khách cần trả,
+      x: thu khác (tip), m: tiền mặt, q: chuyển khoản + thẻ + ví,
+      i: [[mã hàng, tên, SL, thành tiền, đơn giá, giảm giá dòng]]}
 
-   Với mỗi hoá đơn có số điện thoại:
+   Hoá đơn khách lẻ (không số) nhập thành hoá đơn không gắn khách — để sổ
+   ngày và lương thợ của những ngày cũ đủ. Với mỗi hoá đơn có số điện thoại:
      – đã nhập hoá đơn này rồi              → bỏ qua (nhập lại file không đếm đôi)
      – khách có lượt quầy ghi CÙNG NGÀY     → khớp: gắn mã HĐ, lấy số tiền thật của KiotViet
      – không có                              → tạo lượt mới (quầy quên ghi, hoặc là lịch sử cũ)
@@ -905,40 +970,84 @@ case 'import': {
         'new_customers' => 0, 'amount_created' => 0];
   $unmapped = []; $dung = []; $min = null; $max = null;
   $thoCache = []; $thoMoi = []; $n['barber_filled'] = 0;
+  $thoTruoc = (int)$pdo->query('SELECT COALESCE(MAX(id), 0) FROM barbers')->fetchColumn();
   $fillTho  = $pdo->prepare('UPDATE visits SET barber_id = ? WHERE kv_invoice = ? AND barber_id IS NULL');
 
   $findDup  = $pdo->prepare('SELECT 1 FROM visits WHERE kv_invoice = ?');
   $findSame = $pdo->prepare("SELECT id FROM visits WHERE customer_id = ? AND visit_date = ? AND kv_invoice IS NULL
                                AND void_at IS NULL AND source IN ('counter','owner') ORDER BY id");
-  $link     = $pdo->prepare('UPDATE visits SET kv_invoice = ?, amount = ? WHERE id = ?');
-  $insV     = $pdo->prepare("INSERT INTO visits (customer_id, visit_date, visit_time, amount, source, kv_invoice, barber_id, created_at, created_by)
-                             VALUES (?,?,?,?,'import',?,?,?,?)");
-  $insI     = $pdo->prepare('INSERT INTO visit_items (visit_id, service_id, kv_code, name, kind, qty, price) VALUES (?,?,?,?,?,?,?)');
+  /* Lượt quầy ghi kiểu cũ (chưa có tiền trả) thì lấy số tiền của KiotViet;
+     hoá đơn bán bằng app (đã có tiền trả) thì giữ số của app. */
+  $link     = $pdo->prepare('UPDATE visits SET kv_invoice = ?,
+                               amount = CASE WHEN pay_cash + pay_transfer = 0 THEN ? ELSE amount END,
+                               tip = CASE WHEN pay_cash + pay_transfer = 0 THEN ? ELSE tip END,
+                               pay_cash = CASE WHEN pay_cash + pay_transfer = 0 THEN ? ELSE pay_cash END,
+                               pay_transfer = CASE WHEN pay_cash + pay_transfer = 0 THEN ? ELSE pay_transfer END
+                             WHERE id = ?');
+  $insV     = $pdo->prepare("INSERT INTO visits (customer_id, visit_date, visit_time, amount, subtotal, discount, tip, pay_cash, pay_transfer,
+                                                 source, kv_invoice, barber_id, created_at, created_by)
+                             VALUES (?,?,?,?,?,?,?,?,?,'import',?,?,?,?)");
+  $insI     = $pdo->prepare('INSERT INTO visit_items (visit_id, service_id, kv_code, name, kind, qty, price, list_price, disc) VALUES (?,?,?,?,?,?,?,?,?)');
+  /* Hoá đơn đã nhập bằng bản app trước (chưa đọc cột tiền mặt / chuyển
+     khoản / thu khác): nhập lại file là điền bù. */
+  $fillPay  = $pdo->prepare('UPDATE visits SET amount = ?, tip = ?, pay_cash = ?, pay_transfer = ?,
+                               subtotal = CASE WHEN subtotal = 0 THEN ? ELSE subtotal END,
+                               discount = CASE WHEN subtotal = 0 THEN ? ELSE discount END
+                             WHERE kv_invoice = ? AND source = \'import\' AND pay_cash + pay_transfer = 0 AND tip = 0');
+  $n['pay_filled'] = 0;
 
   foreach ($inv as $h) {
     $code  = trim((string)($h['c'] ?? ''));
     $phone = mhPhone((string)($h['p'] ?? ''));
     $t     = (string)($h['t'] ?? '');
     if ($code === '' || !preg_match('/^(\d{4}-\d{2}-\d{2})(?: (\d{2}:\d{2}))?/', $t, $m)) continue;
-    if (strlen($phone) < 9) { $n['walkin']++; continue; }
     $date = $m[1]; $time = $m[2] ?? '';
-    if ($min === null || $date < $min) $min = $date;
-    if ($max === null || $date > $max) $max = $date;
+    $khachLe = strlen($phone) < 9;
 
     $bid = mhBarberFromKv((string)($h['b'] ?? ''), $thoCache, $thoMoi);
+    /* Tiền: "khách cần trả" của KiotViet gồm cả thu khác (tip) — tách ra. */
+    $tip    = max(0, (int)round((float)($h['x'] ?? 0)));
+    $amount = (int)round((float)($h['a'] ?? 0)) - $tip;
+    $cash   = (int)round((float)($h['m'] ?? 0));
+    $ck     = (int)round((float)($h['q'] ?? 0));
+    $sub    = 0;
+    foreach ((array)($h['i'] ?? []) as $it)
+      $sub += isset($it[4]) ? (int)round((float)$it[4]) * max(1, (int)($it[2] ?? 1)) : (int)round((float)($it[3] ?? 0));
+    if ($sub < $amount) $sub = $amount;
 
     $findDup->execute([$code]);
     if ($findDup->fetchColumn()) {
       $n['dup']++;
-      /* Hoá đơn đã nhập từ trước khi app biết đọc cột thợ: nhập lại cùng
-         file là điền bù thợ cho các lượt cũ. */
+      /* Hoá đơn đã nhập từ trước khi app biết đọc cột thợ / cột tiền: nhập
+         lại cùng file là điền bù cho các lượt cũ. */
       if ($bid) { $fillTho->execute([$bid, $code]); $n['barber_filled'] += $fillTho->rowCount(); }
+      if ($cash + $ck > 0 || $tip > 0) {
+        $fillPay->execute([$amount, $tip, $cash, $ck, $sub, $sub - $amount, $code]);
+        $n['pay_filled'] += $fillPay->rowCount();
+      }
       continue;
     }
 
+    if ($khachLe) {
+      /* Khách lẻ: không đụng gì tới hạng hay đối soát, chỉ thêm doanh thu. */
+      $n['walkin']++;
+      $insV->execute([null, $date, $time, $amount, $sub, $sub - $amount, $tip, $cash, $ck, $code, $bid, time(), $u['id']]);
+      $vid = (int)$pdo->lastInsertId();
+      foreach ((array)($h['i'] ?? []) as $it) {
+        $kv = mb_strtoupper(trim((string)($it[0] ?? '')));
+        $mm = $map[$kv] ?? null;
+        $insI->execute([$vid, $mm ? $mm['id'] : null, $kv ?: null, (string)($it[1] ?? ''), $mm ? $mm['kind'] : 'other',
+                        max(1, (int)($it[2] ?? 1)), (int)round((float)($it[3] ?? 0)),
+                        (int)round((float)($it[4] ?? 0)), (int)round((float)($it[5] ?? 0))]);
+      }
+      $n['amount_created'] += $amount;
+      continue;
+    }
+    if ($min === null || $date < $min) $min = $date;
+    if ($max === null || $date > $max) $max = $date;
+
     $c = mhEnsureCustomer($phone, trim((string)($h['n'] ?? '')), $u['id'], trim((string)($h['k'] ?? '')));
     if ($c['_new']) $n['new_customers']++;
-    $amount = (int)round((float)($h['a'] ?? 0));
 
     $findSame->execute([$c['id'], $date]);
     $vid = null;
@@ -947,14 +1056,14 @@ case 'import': {
 
     if ($vid) {
       $dung[$vid] = true;
-      $link->execute([$code, $amount, $vid]);
+      $link->execute([$code, $amount, $tip, $cash, $ck, $vid]);
       if ($bid) $pdo->prepare('UPDATE visits SET barber_id = ? WHERE id = ? AND barber_id IS NULL')->execute([$bid, $vid]);
       mhDelFlag($vid, 'NO_INVOICE');
       $n['linked']++;
       continue;
     }
 
-    $insV->execute([$c['id'], $date, $time, $amount, $code, $bid, time(), $u['id']]);
+    $insV->execute([$c['id'], $date, $time, $amount, $sub, $sub - $amount, $tip, $cash, $ck, $code, $bid, time(), $u['id']]);
     $vid = (int)$pdo->lastInsertId();
     foreach ((array)($h['i'] ?? []) as $it) {
       $kv = mb_strtoupper(trim((string)($it[0] ?? '')));
@@ -964,10 +1073,23 @@ case 'import': {
         $unmapped[$kv]['count']++;
       }
       $insI->execute([$vid, $mm ? $mm['id'] : null, $kv ?: null, (string)($it[1] ?? ''),
-                      $mm ? $mm['kind'] : 'other', max(1, (int)($it[2] ?? 1)), (int)round((float)($it[3] ?? 0))]);
+                      $mm ? $mm['kind'] : 'other', max(1, (int)($it[2] ?? 1)), (int)round((float)($it[3] ?? 0)),
+                      (int)round((float)($it[4] ?? 0)), (int)round((float)($it[5] ?? 0))]);
     }
     $n['created']++;
     $n['amount_created'] += $amount;
+  }
+
+  /* Thợ mới lấy từ file: chỉ để "đang làm" (hiện ở quầy) nếu có hoá đơn
+     trong 60 ngày gần đây — nhập file 2019 thì thợ đã nghỉ từ lâu không
+     được hiện ra cho quầy chọn. */
+  if ($thoMoi) {
+    $pdo->prepare('UPDATE barbers SET active = CASE WHEN EXISTS (SELECT 1 FROM visits v WHERE v.barber_id = barbers.id
+                     AND v.visit_date >= ?) THEN active ELSE 0 END WHERE id > ?')
+        ->execute([date('Y-m-d', strtotime('-60 days')), $thoTruoc]);
+    $st = $pdo->prepare('SELECT name, active FROM barbers WHERE id > ? ORDER BY active DESC, id');
+    $st->execute([$thoTruoc]);
+    $thoMoi = array_map(function ($b) { return $b['name'] . ($b['active'] ? '' : ' (đã nghỉ)'); }, $st->fetchAll());
   }
 
   /* Lượt quầy ghi trong khoảng ngày của file mà không khớp hoá đơn nào. */
@@ -996,6 +1118,120 @@ case 'import': {
   }
   out(['ok' => true, 'committed' => $commit, 'stats' => $n, 'barbers_new' => $thoMoi,
        'unmapped' => array_values($unmapped), 'orphans' => $orphans]);
+}
+
+/* ===== khuyến mãi ===== */
+
+case 'promos': {
+  mhRequireOwner();
+  out(['ok' => true, 'rows' => mhPromos(false)]);
+}
+
+case 'promo_save': {
+  $u = mhRequireOwner();
+  $id = (int)inp('id', 0);
+  $name = trim((string)inp('name', ''));
+  $kind = inp('kind') === 'amt' ? 'amt' : 'pct';
+  $val  = (int)inp('value', 0);
+  $start = (string)inp('start_date', ''); $end = (string)inp('end_date', '');
+  if ($name === '') out(['ok' => false, 'error' => 'Đặt tên cho khuyến mãi.'], 400);
+  if ($kind === 'pct' && ($val < 1 || $val > 100)) out(['ok' => false, 'error' => 'Giảm % phải từ 1 đến 100.'], 400);
+  if ($kind === 'amt' && ($val < 1000 || $val > 10000000)) out(['ok' => false, 'error' => 'Số tiền giảm từ 1.000đ.'], 400);
+  if ($start !== '' && !validDate($start)) out(['ok' => false, 'error' => 'Ngày bắt đầu không đúng.'], 400);
+  if ($end !== '' && (!validDate($end) || ($start !== '' && $end < $start))) out(['ok' => false, 'error' => 'Ngày kết thúc phải sau ngày bắt đầu.'], 400);
+  $vals = [$name, $kind, $val, $start, $end, inp('active', 1) ? 1 : 0];
+  if ($id) db()->prepare('UPDATE promos SET name=?, kind=?, value=?, start_date=?, end_date=?, active=? WHERE id=?')->execute(array_merge($vals, [$id]));
+  else {
+    $sort = (int)db()->query('SELECT COALESCE(MAX(sort),0)+1 FROM promos')->fetchColumn();
+    db()->prepare('INSERT INTO promos (name, kind, value, start_date, end_date, active, sort, created_at) VALUES (?,?,?,?,?,?,?,?)')
+        ->execute(array_merge($vals, [$sort, time()]));
+  }
+  mhAudit($u['id'], 'promo_save', $name . ' · ' . ($kind === 'pct' ? "$val%" : $val . 'đ'));
+  out(['ok' => true, 'rows' => mhPromos(false)]);
+}
+
+case 'promo_del': {
+  $u = mhRequireOwner();
+  db()->prepare('DELETE FROM promos WHERE id = ?')->execute([(int)inp('id', 0)]);
+  mhAudit($u['id'], 'promo_del', '#' . (int)inp('id', 0));
+  out(['ok' => true, 'rows' => mhPromos(false)]);
+}
+
+/* ===== lương ===== */
+
+/* Tháng đã chốt thì trả đúng bảng đã chốt; chưa chốt thì tính theo mức
+   tiền công đang đặt. */
+case 'payroll': {
+  mhRequireOwner();
+  $m = (string)inp('month', date('Y-m'));
+  if (!preg_match('/^\d{4}-\d{2}$/', $m)) out(['ok' => false, 'error' => 'Tháng không đúng.'], 400);
+  $st = db()->prepare('SELECT p.*, u.name AS by_name FROM payroll_closed p LEFT JOIN users u ON u.id = p.closed_by WHERE month = ?');
+  $st->execute([$m]);
+  if ($c = $st->fetch()) {
+    $d = json_decode($c['data'], true) ?: [];
+    out(['ok' => true, 'closed' => ['at' => (int)$c['closed_at'], 'by' => $c['by_name']]] + $d);
+  }
+  out(['ok' => true, 'closed' => null] + mhPayroll($m));
+}
+
+case 'payroll_adjust_add': {
+  $u = mhRequireOwner();
+  $m = (string)inp('month', ''); $bid = (int)inp('barber_id', 0);
+  $label = trim((string)inp('label', '')); $amt = (int)inp('amount', 0);
+  if (!preg_match('/^\d{4}-\d{2}$/', $m)) out(['ok' => false, 'error' => 'Tháng không đúng.'], 400);
+  if (!in_array($bid, array_column(mhBarbers(), 'id'), true)) out(['ok' => false, 'error' => 'Không có thợ này.'], 400);
+  if ($label === '') out(['ok' => false, 'error' => 'Ghi nội dung (thưởng, ứng lương…).'], 400);
+  if ($amt === 0) out(['ok' => false, 'error' => 'Nhập số tiền (số âm là trừ).'], 400);
+  $st = db()->prepare('SELECT 1 FROM payroll_closed WHERE month = ?'); $st->execute([$m]);
+  if ($st->fetchColumn()) out(['ok' => false, 'error' => 'Tháng này đã chốt lương — mở lại rồi mới sửa.'], 409);
+  db()->prepare('INSERT INTO payroll_adjust (month, barber_id, label, amount, created_at, created_by) VALUES (?,?,?,?,?,?)')
+      ->execute([$m, $bid, mb_substr($label, 0, 120), $amt, time(), $u['id']]);
+  mhAudit($u['id'], 'payroll_adjust', "$m thợ #$bid · $label · $amt");
+  out(['ok' => true, 'closed' => null] + mhPayroll($m));
+}
+
+case 'payroll_adjust_del': {
+  $u = mhRequireOwner();
+  $st = db()->prepare('SELECT * FROM payroll_adjust WHERE id = ?'); $st->execute([(int)inp('id', 0)]);
+  $a = $st->fetch();
+  if (!$a) out(['ok' => false, 'error' => 'Không tìm thấy.'], 404);
+  $st = db()->prepare('SELECT 1 FROM payroll_closed WHERE month = ?'); $st->execute([$a['month']]);
+  if ($st->fetchColumn()) out(['ok' => false, 'error' => 'Tháng này đã chốt lương — mở lại rồi mới sửa.'], 409);
+  db()->prepare('DELETE FROM payroll_adjust WHERE id = ?')->execute([(int)$a['id']]);
+  mhAudit($u['id'], 'payroll_adjust_del', $a['month'] . ' · ' . $a['label'] . ' · ' . $a['amount']);
+  out(['ok' => true, 'closed' => null] + mhPayroll($a['month']));
+}
+
+/* Chốt: chụp lại bảng lương. Sau đó đổi tiền công dịch vụ, huỷ hoá đơn
+   cũ… cũng không làm lệch tháng đã trả. */
+case 'payroll_close': {
+  $u = mhRequireOwner();
+  $m = (string)inp('month', '');
+  if (!preg_match('/^\d{4}-\d{2}$/', $m)) out(['ok' => false, 'error' => 'Tháng không đúng.'], 400);
+  if ($m >= date('Y-m') && !inp('force')) out(['ok' => false, 'error' => 'Tháng này chưa hết — chỉ chốt tháng đã qua.'], 400);
+  $d = mhPayroll($m);
+  db()->prepare('INSERT OR REPLACE INTO payroll_closed (month, data, closed_at, closed_by) VALUES (?,?,?,?)')
+      ->execute([$m, json_encode($d, JSON_UNESCAPED_UNICODE), time(), $u['id']]);
+  mhAudit($u['id'], 'payroll_close', $m . ' · ' . array_sum(array_column($d['rows'], 'total')));
+  out(['ok' => true, 'closed' => ['at' => time(), 'by' => $u['name']]] + $d);
+}
+
+case 'payroll_reopen': {
+  $u = mhRequireOwner();
+  $m = (string)inp('month', '');
+  db()->prepare('DELETE FROM payroll_closed WHERE month = ?')->execute([$m]);
+  mhAudit($u['id'], 'payroll_reopen', $m);
+  out(['ok' => true, 'closed' => null] + mhPayroll($m));
+}
+
+case 'setting_save': {
+  $u = mhRequireOwner();
+  $k = (string)inp('key', '');
+  if (!in_array($k, ['payroll_tip'], true)) out(['ok' => false, 'error' => 'Không có mục này.'], 400);
+  $v = inp('value') ? '1' : '0';
+  db()->prepare('INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')->execute([$k, $v]);
+  mhAudit($u['id'], 'setting_save', "$k = $v");
+  out(['ok' => true]);
 }
 
 /* ===== tài khoản ===== */

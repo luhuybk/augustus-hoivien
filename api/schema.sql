@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS barbers (
   id          INTEGER PRIMARY KEY,
   name        TEXT    NOT NULL,
   kv_name     TEXT    NOT NULL DEFAULT '',
+  base_salary INTEGER NOT NULL DEFAULT 0,    -- lương cứng mỗi tháng
   active      INTEGER NOT NULL DEFAULT 1,
   sort        INTEGER NOT NULL DEFAULT 0,
   created_at  INTEGER NOT NULL
@@ -98,31 +99,48 @@ CREATE TABLE IF NOT EXISTS barbers (
      product — sản phẩm bán kèm
      other   — không tính gì, chỉ cộng tiền
    kv_codes: các mã hàng bên KiotViet ứng với dịch vụ này, cách nhau dấu phẩy
-   — để nhập file Excel thì tự biết dòng nào là cắt, dòng nào là uốn. */
+   — để nhập file Excel thì tự biết dòng nào là cắt, dòng nào là uốn.
+   wage / comm_pct: phần của thợ — tiền cố định mỗi lượt, và % hoa hồng
+   trên tiền thực thu (sản phẩm). Lương tháng tính theo mức ĐANG đặt; chốt
+   lương thì con số được chụp lại, đổi mức sau đó không làm lệch tháng cũ.
+   discountable: dòng này có được giảm theo hạng / khuyến mãi không. */
 CREATE TABLE IF NOT EXISTS services (
   id        INTEGER PRIMARY KEY,
   name      TEXT    NOT NULL,
   kind      TEXT    NOT NULL DEFAULT 'other',
   price     INTEGER NOT NULL DEFAULT 0,      -- 0 = quầy tự nhập giá (sản phẩm)
   kv_codes  TEXT    NOT NULL DEFAULT '',
+  wage      INTEGER NOT NULL DEFAULT 0,
+  comm_pct  REAL    NOT NULL DEFAULT 0,
+  discountable INTEGER NOT NULL DEFAULT 1,
   active    INTEGER NOT NULL DEFAULT 1,
   sort      INTEGER NOT NULL DEFAULT 0
 );
 
 /* ---------------- lượt ghé ---------------- */
 
-/* Một dòng = một lần khách ghé (một hoá đơn). Huỷ thì KHÔNG xoá, chỉ đánh
-   dấu void_* — để còn biết ai huỷ, lúc nào, vì sao.
+/* Một dòng = một hoá đơn (một lần khách ghé). Huỷ thì KHÔNG xoá, chỉ
+   đánh dấu void_* — để còn biết ai huỷ, lúc nào, vì sao.
 
+   customer_id NULL = khách lẻ không để số — vẫn là doanh thu, vẫn tính
+   lương thợ, chỉ không vào hạng.
+   amount = tiền hàng khách trả sau giảm giá, KHÔNG gồm tip; subtotal là
+   theo giá niêm yết. pay_cash + pay_transfer = amount + tip.
    source: 'counter' quầy ghi · 'owner' chủ ghi tay · 'import' nạp từ
    file KiotViet. created_at luôn là giờ máy chủ, không nhận giờ từ máy
    người dùng. */
 CREATE TABLE IF NOT EXISTS visits (
   id          INTEGER PRIMARY KEY,
-  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE,
   visit_date  TEXT    NOT NULL,              -- 'YYYY-MM-DD' giờ VN
   visit_time  TEXT    NOT NULL DEFAULT '',   -- 'HH:MM', chỉ để hiện
   amount      INTEGER NOT NULL DEFAULT 0,
+  subtotal    INTEGER NOT NULL DEFAULT 0,
+  discount    INTEGER NOT NULL DEFAULT 0,
+  disc_note   TEXT    NOT NULL DEFAULT '',   -- "Hạng Vàng −15%", tên khuyến mãi…
+  tip         INTEGER NOT NULL DEFAULT 0,
+  pay_cash    INTEGER NOT NULL DEFAULT 0,
+  pay_transfer INTEGER NOT NULL DEFAULT 0,
   source      TEXT    NOT NULL DEFAULT 'counter',
   kv_invoice  TEXT,                          -- mã hoá đơn KiotViet đã khớp
   flags       TEXT    NOT NULL DEFAULT '',   -- NO_INVOICE: đối soát không thấy hoá đơn
@@ -150,7 +168,9 @@ CREATE TABLE IF NOT EXISTS visit_items (
   name        TEXT    NOT NULL,
   kind        TEXT    NOT NULL DEFAULT 'other',
   qty         INTEGER NOT NULL DEFAULT 1,
-  price       INTEGER NOT NULL DEFAULT 0
+  price       INTEGER NOT NULL DEFAULT 0,    -- thành tiền của dòng, đã trừ giảm giá
+  list_price  INTEGER NOT NULL DEFAULT 0,    -- đơn giá niêm yết lúc bán
+  disc        INTEGER NOT NULL DEFAULT 0     -- giảm giá của dòng
 );
 CREATE INDEX IF NOT EXISTS idx_item_visit ON visit_items(visit_id);
 CREATE INDEX IF NOT EXISTS idx_item_kind  ON visit_items(kind, visit_id);
@@ -167,6 +187,7 @@ CREATE TABLE IF NOT EXISTS tiers (
   min_spend  INTEGER NOT NULL DEFAULT 0,
   perks      TEXT    NOT NULL DEFAULT '',
   bday_gift  TEXT    NOT NULL DEFAULT '',     -- quà sinh nhật của hạng này; trống = không có
+  disc_pct   INTEGER NOT NULL DEFAULT 0,      -- % giảm mỗi bill, trên các dòng được giảm
   sort       INTEGER NOT NULL DEFAULT 0
 );
 
@@ -212,6 +233,44 @@ CREATE TABLE IF NOT EXISTS rewards_given (
   given_at    INTEGER NOT NULL,
   given_by    INTEGER,
   UNIQUE (customer_id, program_id, seq)
+);
+
+/* Khuyến mãi quầy chọn được khi tính tiền (HSSV, khai trương…). Chỉ chủ
+   tạo; quầy không gõ tay được số tiền giảm. Không cộng dồn với giảm theo
+   hạng — app lấy mức nào có lợi hơn cho khách.
+   kind: 'pct' (giảm %) hoặc 'amt' (giảm số tiền). */
+CREATE TABLE IF NOT EXISTS promos (
+  id          INTEGER PRIMARY KEY,
+  name        TEXT    NOT NULL,
+  kind        TEXT    NOT NULL DEFAULT 'pct',
+  value       INTEGER NOT NULL DEFAULT 0,
+  start_date  TEXT    NOT NULL DEFAULT '',
+  end_date    TEXT    NOT NULL DEFAULT '',
+  active      INTEGER NOT NULL DEFAULT 1,
+  sort        INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL
+);
+
+/* ---------------- lương ---------------- */
+
+/* Thưởng / phạt / ứng lương trong tháng — số âm là trừ. */
+CREATE TABLE IF NOT EXISTS payroll_adjust (
+  id          INTEGER PRIMARY KEY,
+  month       TEXT    NOT NULL,              -- 'YYYY-MM'
+  barber_id   INTEGER NOT NULL REFERENCES barbers(id) ON DELETE CASCADE,
+  label       TEXT    NOT NULL,
+  amount      INTEGER NOT NULL,
+  created_at  INTEGER NOT NULL,
+  created_by  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_padj_month ON payroll_adjust(month);
+
+/* Tháng đã chốt lương: chụp lại nguyên bảng lương lúc chốt (JSON). */
+CREATE TABLE IF NOT EXISTS payroll_closed (
+  month       TEXT    PRIMARY KEY,
+  data        TEXT    NOT NULL,
+  closed_at   INTEGER NOT NULL,
+  closed_by   INTEGER
 );
 
 /* ---------------- hệ thống ---------------- */
