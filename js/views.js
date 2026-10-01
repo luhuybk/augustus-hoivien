@@ -16,6 +16,10 @@ const tienGon = n => {
 const soTien = n => Number(n) ? Number(n).toLocaleString('vi-VN') : '';
 /* Tên món kèm tên sản phẩm cụ thể: "Sản phẩm A – 12% · Wax Reuzel". */
 const tenMon = i => i.name + (i.detail ? ' · ' + i.detail : '');
+/* Phút trong ngày → "09:30". */
+const hm = m => String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+const THU = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
+const thuCua = d => THU[new Date(d + 'T00:00:00').getDay()];
 const ngay = d => d ? d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4) : '';
 const ngayNgan = d => d ? d.slice(8, 10) + '/' + d.slice(5, 7) : '';
 
@@ -398,7 +402,7 @@ const Views = {
            <div class="dim">Trao xong bấm “Đã trao” ở thẻ khách.</div></div>` : ''}`)
       : st.newCus ? `<form id="posNewCus" class="grid2" autocomplete="off">
            <input class="inp" name="phone" inputmode="tel" placeholder="Số điện thoại (10 số)" value="${esc(st.newPhone || '')}" required>
-           <input class="inp" name="name" placeholder="Tên khách" required>
+           <input class="inp" name="name" placeholder="Tên khách" value="${esc(st.newName || '')}" required>
            <button class="btn sm pri" type="submit">Tạo khách</button>
            <button class="btn sm" type="button" data-act="posNewCus">Thôi</button></form>`
       : `<input id="posQ" class="inp posq" placeholder="4 số cuối điện thoại hoặc tên khách   ( / )" value="${esc(st.q || '')}"
@@ -448,6 +452,8 @@ const Views = {
 
     return `<div class="wrap poswrap">
       ${head('Bán hàng', false, owner ? `<input type="date" id="posDate" class="inp" style="width:auto;padding:8px" value="${esc(st.date || App.today)}" max="${esc(App.today)}" title="Chủ quán ghi bù ngày cũ được">` : '')}
+      ${st.booking ? `<p class="note" style="margin-top:-4px">📅 Tính tiền cho lịch hẹn ${esc(st.bookingLabel || '')} — thanh toán xong lịch tự đánh dấu "đã tính tiền".</p>`
+                   : this.posBookings(data.bookings, data.barbers || [])}
       <div class="posgrid"><div>
         <div class="card"><h3>1 · Khách</h3>${khach}</div>
         <div class="card"><h3>2 · Thợ${coTho && !owner ? '' : ' <span class="dim" style="font-weight:400">(không bắt buộc với chủ)</span>'}</h3>
@@ -774,6 +780,261 @@ const Views = {
     });
     if (ngayTruoc) html += '</div>';
     return html;
+  },
+
+  /* ---------------- lịch hẹn ---------------- */
+
+  /* Sổ lịch một ngày: mỗi thợ một cột, trục dọc là giờ. Bấm chỗ trống là
+     đặt lịch đúng thợ, đúng giờ đó; bấm một lịch là mở chi tiết. */
+  sched(d, ui){
+    const cfg = d.cfg, PX = 1.3, H = (cfg.close - cfg.open) * PX;
+    const homNay = d.date === App.today;
+    const nghiQuan = cfg.closed_days.includes(new Date(d.date + 'T00:00:00').getDay());
+    const conHieuLuc = d.rows.filter(b => b.status !== 'cancel' && b.status !== 'noshow');
+    const top = m => ((m - cfg.open) * PX).toFixed(1);
+    const nhan = [];
+    for (let m = Math.ceil(cfg.open / 60) * 60; m < cfg.close; m += 60) nhan.push(m);
+    const cot = b => {
+      const ds = conHieuLuc.filter(x => x.barber_id === b.id).sort((p, q) => p.start - q.start);
+      /* Lịch trùng giờ (quầy bấm "vẫn đặt") thì xếp làn cạnh nhau, không đè lên nhau. */
+      const lan = [], cuoi = [];
+      ds.forEach(x => { let k = cuoi.findIndex(z => z <= x.start); if (k < 0){ k = cuoi.length; cuoi.push(0); } cuoi[k] = x.start + x.dur; lan.push(k); });
+      const soLan = ds.map((x, i) => 1 + Math.max(...ds.map((y, j) => y.start < x.start + x.dur && x.start < y.start + y.dur ? lan[j] : 0)));
+      const off = d.off.filter(o => o.barber_id === b.id);
+      return `<div class="scol" data-act="schedAt" data-b="${b.id}" style="height:${H}px">
+        ${nhan.map(m => `<i class="sline" style="top:${top(m)}px"></i>`).join('')}
+        ${off.map(o => { const a = Math.max(o.start, cfg.open), z = Math.min(o.end, cfg.close);
+          return z > a ? `<div class="soff" style="top:${top(a)}px;height:${((z - a) * PX).toFixed(1)}px">
+            <span>Nghỉ${o.start > 0 || o.end < 1440 ? ' ' + hm(o.start) + '–' + hm(o.end) : ''}${o.note ? ' · ' + esc(o.note) : ''}</span>
+            <button class="x" data-act="offDel" data-id="${o.id}" title="Bỏ giờ nghỉ">×</button></div>` : ''; }).join('')}
+        ${ds.map((x, i) => `<div class="sbk st-${x.status}${x.confirmed ? '' : ' unconf'}${ui.sel === x.id ? ' sel' : ''}" data-act="schedSel" data-id="${x.id}"
+            style="top:${top(Math.max(x.start, cfg.open))}px;height:${Math.max(20, x.dur * PX - 2).toFixed(1)}px;left:calc(${(lan[i] / soLan[i] * 100).toFixed(2)}% + 3px);width:calc(${(100 / soLan[i]).toFixed(2)}% - 6px);right:auto">
+          <b>${hm(x.start)}</b> ${esc(x.name || 'Khách')}${x.confirmed ? '' : ' 🌐'}
+          <small>${esc(x.services.map(v => v.name).join(', '))}</small></div>`).join('')}
+        ${homNay && d.now >= cfg.open && d.now <= cfg.close ? `<i class="snow" style="top:${top(d.now)}px"></i>` : ''}
+      </div>`;
+    };
+    const tt = {booked: '', arrived: 'đang làm', done: 'đã tính tiền', noshow: 'không đến', cancel: 'đã huỷ'};
+    const sel = d.rows.find(x => x.id === ui.sel);
+    return `<div class="wrap wide-wrap">
+      ${head('Lịch hẹn', false, '<button class="chip" data-act="reload">↻</button>')}
+      <div class="schednav"><button class="chip" data-act="schedDay" data-d="-1" aria-label="Ngày trước">‹</button>
+        <input type="date" id="schedDate" class="inp" value="${esc(d.date)}">
+        <button class="chip" data-act="schedDay" data-d="1" aria-label="Ngày sau">›</button>
+        ${homNay ? '' : '<button class="chip" data-act="schedDay" data-d="0">Hôm nay</button>'}</div>
+      <p class="dim" style="margin-top:0">${thuCua(d.date)} · ${ngay(d.date)} · ${conHieuLuc.length} lịch hẹn
+        ${nghiQuan ? ' · <b style="color:var(--warn)">ngày quán nghỉ</b>' : ''}</p>
+      ${d.unconfirmed ? `<p class="note" style="color:var(--warn)">🌐 ${d.unconfirmed} lịch khách tự đặt chưa gọi xác nhận (đánh dấu 🌐 trên lịch).</p>` : ''}
+      <div class="row" style="gap:8px;margin-bottom:12px;flex-wrap:wrap">
+        <button class="btn sm pri" data-act="bookNew">+ Đặt lịch</button>
+        <button class="btn sm" data-act="offNew">Thợ nghỉ</button>
+      </div>
+      <div id="schedPanel">${ui.form ? this.bookForm(ui.form, d) : ui.off ? this.offForm(ui.off, d) : sel ? this.bookDetail(sel, d) : ''}</div>
+      ${d.barbers.length ? `<div class="sgrid" style="grid-template-columns:44px repeat(${d.barbers.length}, minmax(0,1fr))">
+        <div></div>${d.barbers.map(b => `<div class="shead">✂︎ ${esc(b.name)} <small>${conHieuLuc.filter(x => x.barber_id === b.id).length}</small></div>`).join('')}
+        <div class="stimes" style="height:${H}px">${nhan.map(m => `<span style="top:${top(m)}px">${hm(m)}</span>`).join('')}</div>
+        ${d.barbers.map(cot).join('')}
+      </div>` : '<div class="card dim">Chưa khai thợ — chủ quán thêm ở Thiết lập → Thợ cắt.</div>'}
+      ${d.rows.length ? `<div class="card" style="margin-top:14px"><h3>Danh sách trong ngày</h3><div class="list">${d.rows.map(x => `
+        <button class="item${x.status === 'cancel' || x.status === 'noshow' ? ' void' : ''}" data-act="schedSel" data-id="${x.id}">
+          <b class="num" style="min-width:92px">${hm(x.start)}–${hm(x.start + x.dur)}</b>
+          <div class="grow"><b>${esc(x.name || 'Khách')}</b> ${x.tier ? tierBadge(x.tier) : ''}${x.confirmed ? '' : ' <span class="badge warn">🌐 chưa xác nhận</span>'}
+            <div class="sub">${esc(x.services.map(v => v.name).join(', ') || '—')} · ✂︎ ${esc((d.barbers.find(b => b.id === x.barber_id) || {}).name || '?')}${x.any ? ' (ai cũng được)' : ''}</div></div>
+          ${tt[x.status] ? `<span class="badge${x.status === 'noshow' || x.status === 'cancel' ? ' bad' : ''}">${tt[x.status]}</span>` : ''}
+        </button>`).join('')}</div></div>` : ''}
+    </div>`;
+  },
+
+  bookDetail(b, d){
+    const tho = (d.barbers.find(x => x.id === b.barber_id) || {}).name || '?';
+    const goi = /^\d{10}$/.test(b.phone || '');
+    const nut = (act, ten, cls) => `<button class="btn sm${cls ? ' ' + cls : ''}" data-act="${act}" data-id="${b.id}">${ten}</button>`;
+    return `<div class="card bkdetail">
+      <div class="row"><h3 class="grow" style="margin:0">${hm(b.start)}–${hm(b.start + b.dur)} · ✂︎ ${esc(tho)}${b.any ? ' <span class="dim">(khách không kén thợ)</span>' : ''}</h3>
+        <button class="x" data-act="schedClose" aria-label="Đóng">×</button></div>
+      <div style="margin-top:8px"><b style="font-size:16px">${esc(b.name || 'Khách')}</b> ${b.tier ? tierBadge(b.tier) : ''}
+        ${b.phone ? (goi ? ` · <a href="tel:${esc(b.phone)}" class="num">${esc(b.phone)}</a>` : ` · <span class="num dim">${esc(b.phone)}</span>`) : ''}</div>
+      <div class="sub" style="margin-top:4px">${esc(b.services.map(v => v.name).join(', ') || 'Chưa chọn dịch vụ')} · ${b.dur} phút</div>
+      ${b.note ? `<div class="sub">📝 ${esc(b.note)}</div>` : ''}
+      <div class="sub dim">${b.source === 'online' ? '🌐 Khách tự đặt online' : 'Quầy đặt' + (b.by ? ' · ' + esc(b.by) : '')}
+        ${b.cancel_note ? ' · ' + esc(b.cancel_note) : ''}</div>
+      ${b.confirmed ? '' : `<p class="note" style="color:var(--warn);margin:10px 0 0">🌐 Khách tự đặt — gọi số trên để xác nhận rồi bấm "Đã gọi xác nhận".</p>`}
+      <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:12px">
+        ${b.status === 'booked' ? (b.confirmed ? '' : nut('bookConfirm', '✓ Đã gọi xác nhận', 'pri'))
+          + nut('bookToPos', '💳 Khách đến — tính tiền', b.confirmed ? 'pri' : '') + nut('bookEdit', 'Sửa giờ / thợ')
+          + nut('bookNoshow', 'Không đến') + nut('bookCancel', 'Huỷ lịch', 'bad') : ''}
+        ${b.status === 'arrived' ? nut('bookToPos', '💳 Tính tiền', 'pri') + nut('bookEdit', 'Sửa') + nut('bookBack', 'Chưa đến') : ''}
+        ${b.status === 'noshow' || b.status === 'cancel' ? nut('bookBack', 'Đặt lại như cũ') : ''}
+        ${b.status === 'done' ? '<span class="badge">✓ Đã tính tiền</span>' : ''}
+      </div></div>`;
+  },
+
+  /* Form đặt / sửa lịch. f giữ mọi thứ đang chọn (App.sched.form). */
+  bookForm(f, d){
+    const khach = f.customer
+      ? `<div class="poscus"><div class="grow"><b>${esc(f.customer.name || '(chưa tên)')}</b> ${tierBadge(f.customer.tier)}
+           <div class="sub num">${esc(f.customer.phone || '')}</div></div>
+           <button class="chip" data-act="bkCusClear">Đổi</button></div>`
+      : f.keepCus ? `<div class="poscus"><div class="grow"><b>${esc(f.name)}</b><div class="sub num">${esc(f.phone || '')}</div></div>
+           <button class="chip" data-act="bkCusClear">Đổi</button></div>`
+      : `<input id="bkQ" class="inp" placeholder="Tra khách quen: 4 số cuối hoặc tên" value="${esc(f.q || '')}" autocomplete="off">
+         <div id="bkRes">${this.bkResults(f)}</div>
+         <div class="grid2" style="margin-top:8px">
+           <input class="inp" id="bkName" placeholder="Hoặc khách mới: tên" value="${esc(f.name || '')}">
+           <input class="inp" id="bkPhone" inputmode="tel" placeholder="Số điện thoại (không bắt buộc)" value="${esc(f.phone || '')}"></div>`;
+    const chon = new Set(f.services);
+    const durs = []; for (let m = 15; m <= 240; m += 15) durs.push(m);
+    return `<div class="card bkform"><div class="row"><h3 class="grow" style="margin:0">${f.id ? 'Sửa lịch hẹn' : 'Đặt lịch mới'}</h3>
+        <button class="x" data-act="schedClose" aria-label="Đóng">×</button></div>
+      <label class="flabel">Khách</label>${khach}
+      <label class="flabel">Dịch vụ</label>
+      <div class="chips wrapchips">${d.services.map(v => `<button class="chip${chon.has(v.id) ? ' on' : ''}" data-act="bkSvc" data-id="${v.id}">${esc(v.name)} <span style="opacity:.7">${v.duration ? v.duration + "'" : ''}</span></button>`).join('')}</div>
+      <div class="grid2">
+        <div><label class="flabel">Thời gian làm</label><select class="inp" id="bkDur">${durs.map(m =>
+          `<option value="${m}"${m === f.dur ? ' selected' : ''}>${m < 60 ? m + ' phút' : Math.floor(m / 60) + ' giờ' + (m % 60 ? ' ' + m % 60 + "'" : '')}</option>`).join('')}</select></div>
+        <div><label class="flabel">Ngày</label><input type="date" class="inp" id="bkDate" value="${esc(f.date)}"></div>
+      </div>
+      <label class="flabel">Thợ</label>
+      <div class="chips wrapchips">${[{id: 0, name: 'Ai cũng được'}].concat(d.barbers).map(b =>
+        `<button class="chip${f.barber_id === b.id ? ' on' : ''}" data-act="bkBarber" data-id="${b.id}">${b.id ? '✂︎ ' : ''}${esc(b.name)}</button>`).join('')}</div>
+      <label class="flabel">Giờ <span class="dim" style="font-weight:400">— giờ còn trống của ${f.barber_id ? 'thợ này' : 'ít nhất một thợ'}</span></label>
+      <div id="bkSlots">${this.bkSlots(f)}</div>
+      <input class="inp" id="bkNote" placeholder="Ghi chú (vd. uốn con sâu, khách đi 2 người)" value="${esc(f.note || '')}" style="margin-top:10px">
+      ${f.busy ? `<p class="note" style="color:var(--warn);margin:10px 0 0">${esc(f.busy)}</p>` : ''}
+      <div class="row" style="gap:8px;margin-top:12px">
+        <button class="btn pri" data-act="bkSave">${f.id ? 'Lưu thay đổi' : 'Đặt lịch'} ${f.start != null ? hm(f.start) : ''}</button>
+        ${f.busy ? '<button class="btn" data-act="bkSave" data-force="1">Vẫn đặt (trùng giờ)</button>' : ''}
+      </div></div>`;
+  },
+
+  bkResults(f){
+    if (f.err) return `<div class="dim" style="margin-top:6px">${esc(f.err)}</div>`;
+    if (!f.rows) return '';
+    if (!f.rows.length) return '<div class="dim" style="margin-top:6px">Không thấy — nhập tên / số khách mới ở dưới.</div>';
+    return `<div class="list" style="margin-top:6px">${f.rows.slice(0, 8).map(r => `<button class="item" data-act="bkPick" data-id="${r.id}">
+      <div class="grow"><b>${esc(r.name || '(chưa có tên)')}</b><div class="sub num">${esc(r.phone)} · ${r.cuts} lần cắt</div></div>${tierBadge(r.tier)}</button>`).join('')}</div>`;
+  },
+
+  bkSlots(f){
+    if (!f.slots) return '<div class="dim">Đang tìm giờ trống…</div>';
+    const ds = f.slots.map(x => x[0]);
+    const ngoai = f.start != null && !ds.includes(f.start);
+    return `<div class="chips wrapchips slotchips">${ds.map(t =>
+      `<button class="chip${f.start === t ? ' on' : ''}" data-act="bkTime" data-t="${t}">${hm(t)}</button>`).join('')
+      || '<span class="dim">Ngày này không còn giờ trống.</span>'}</div>
+      <div class="row" style="gap:8px;margin-top:6px"><span class="dim">Giờ khác:</span>
+        <input type="time" class="inp" id="bkTime" step="300" style="width:auto;padding:6px" value="${f.start != null ? hm(f.start) : ''}">
+        ${ngoai ? '<span style="color:var(--warn);font-size:13px">giờ này đang kín</span>' : ''}</div>`;
+  },
+
+  offForm(o, d){
+    return `<div class="card bkform"><div class="row"><h3 class="grow" style="margin:0">Thợ nghỉ</h3>
+        <button class="x" data-act="schedClose" aria-label="Đóng">×</button></div>
+      <form id="offForm" class="grid2" style="margin-top:10px">
+        <div><label class="flabel">Thợ</label><select class="inp" name="barber_id">${d.barbers.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join('')}</select></div>
+        <div><label class="flabel">Ngày</label><input type="date" class="inp" name="date" value="${esc(o.date)}"></div>
+        <div><label class="flabel">Từ (để trống = cả ngày)</label><input type="time" class="inp" name="start" step="900"></div>
+        <div><label class="flabel">Đến</label><input type="time" class="inp" name="end" step="900"></div>
+        <input class="inp" name="note" placeholder="Lý do (không bắt buộc)" style="grid-column:1/-1">
+        <button class="btn pri" type="submit" style="grid-column:1/-1">Lưu giờ nghỉ</button>
+      </form></div>`;
+  },
+
+  /* Đầu màn Bán hàng: lịch hẹn hôm nay chưa xong. */
+  posBookings(ds, barbers){
+    if (!ds || !ds.length) return '';
+    const ten = id => (barbers.find(b => b.id === id) || {}).name || '';
+    return `<div class="card posbk"><h3>📅 Lịch hẹn hôm nay (${ds.length})</h3><div class="list">${ds.slice(0, 6).map(b => `
+      <div class="item"><b class="num">${hm(b.start)}</b><div class="grow"><b>${esc(b.name || 'Khách')}</b>${b.confirmed ? '' : ' 🌐'}
+        <div class="sub">${esc(b.services.map(v => v.name).join(', '))} · ✂︎ ${esc(ten(b.barber_id))}</div></div>
+        ${b.status === 'arrived' ? '<span class="badge">đang làm</span>' : ''}
+        <button class="chip" data-act="bookToPos" data-id="${b.id}">${b.status === 'arrived' ? 'Tính tiền' : 'Khách đến'}</button></div>`).join('')}</div></div>`;
+  },
+
+  /* Tài khoản thợ: lịch hẹn của mình 7 ngày tới. */
+  bookMine(d){
+    const ngayDs = [...new Set(d.rows.map(b => b.date).concat(d.off.map(o => o.date)))].sort();
+    return `<div class="wrap">
+      ${head('Lịch hẹn của tôi', false, '<button class="chip" data-act="reload">↻</button>')}
+      ${ngayDs.length ? ngayDs.map(n => `<div class="card"><h3>${thuCua(n)} · ${ngay(n)}${n === App.today ? ' · hôm nay' : ''}</h3>
+        ${d.off.filter(o => o.date === n).map(o => `<p class="note" style="margin:0 0 8px">Nghỉ ${o.start > 0 || o.end < 1440 ? hm(o.start) + '–' + hm(o.end) : 'cả ngày'}${o.note ? ' · ' + esc(o.note) : ''}</p>`).join('')}
+        <div class="list">${d.rows.filter(b => b.date === n).map(b => `<div class="item${b.status === 'done' ? ' void' : ''}">
+          <b class="num" style="min-width:92px">${hm(b.start)}–${hm(b.start + b.dur)}</b>
+          <div class="grow"><b>${esc(b.name || 'Khách')}</b> <span class="dim num">${esc(b.phone || '')}</span>
+            <div class="sub">${esc(b.services.map(v => v.name).join(', '))}${b.note ? ' · 📝 ' + esc(b.note) : ''}</div></div>
+          ${b.status === 'done' ? '<span class="badge">xong</span>' : b.status === 'arrived' ? '<span class="badge">đang làm</span>' : ''}</div>`).join('')}</div></div>`).join('')
+        : '<div class="card dim">7 ngày tới chưa có lịch hẹn nào.</div>'}
+    </div>`;
+  },
+
+  /* Thiết lập → Đặt lịch. */
+  bookSet(c){
+    const link = location.origin + location.pathname.replace(/[^/]*$/, '') + 'datlich.html';
+    return `<div class="wrap">
+      ${head('Đặt lịch', true)}
+      <div class="card"><h3>Link cho khách tự đặt</h3>
+        <div class="row" style="gap:8px;flex-wrap:wrap"><code class="grow" id="bookLink" style="word-break:break-all">${esc(link)}</code>
+          <button class="btn sm" data-act="copyLink">Chép link</button><a class="btn sm" href="${esc(link)}" target="_blank" rel="noopener">Mở thử</a></div>
+        <p class="dim" style="margin:8px 0 0">Gắn vào trang Facebook, Zalo OA, Google Maps, bio Instagram. Khách tự đặt thì lịch hiện 🌐 —
+          quầy gọi xác nhận rồi bấm "Đã gọi xác nhận".</p></div>
+      <form id="bookSetForm" class="card"><h3>Giờ & luật đặt lịch</h3>
+        <div class="grid2">
+          <div><label class="flabel">Mở cửa</label><input type="time" class="inp" name="open" value="${hm(c.open)}"></div>
+          <div><label class="flabel">Đóng cửa (lịch phải xong trước giờ này)</label><input type="time" class="inp" name="close" value="${hm(c.close)}"></div>
+          <div><label class="flabel">Bước giờ</label><select class="inp" name="step">${[15, 30].map(x => `<option value="${x}"${c.step === x ? ' selected' : ''}>${x} phút</option>`).join('')}</select></div>
+          <div><label class="flabel">Khách đặt trước tối đa</label><input class="inp" type="number" name="days" min="1" max="60" value="${c.days}"> </div>
+          <div><label class="flabel">Khách phải đặt trước ít nhất (phút)</label><input class="inp" type="number" name="notice" min="0" max="1440" step="15" value="${c.notice}"></div>
+          <div><label class="flabel">Không đến bao nhiêu lần thì chặn tự đặt</label><input class="inp" type="number" name="noshow_block" min="1" max="10" value="${c.noshow_block}"></div>
+        </div>
+        <label class="flabel">Ngày quán nghỉ trong tuần</label>
+        <div class="chips wrapchips">${[1, 2, 3, 4, 5, 6, 0].map(k => `<label class="chip"><input type="checkbox" name="cd" value="${k}"${c.closed_days.includes(k) ? ' checked' : ''}> ${THU[k]}</label>`).join('')}</div>
+        <label class="flabel">Lời nhắn trên trang đặt lịch</label>
+        <textarea class="inp" name="msg" rows="2" placeholder="vd. Đến trễ quá 15 phút lịch sẽ tự huỷ. Uốn / nhuộm vui lòng gọi trước.">${esc(c.msg)}</textarea>
+        <label class="check" style="margin-top:10px"><input type="checkbox" name="online"${c.online ? ' checked' : ''}> Cho khách tự đặt qua link</label>
+        <button class="btn pri" type="submit" style="margin-top:12px">Lưu</button>
+      </form>
+      <p class="dim">Thời gian làm từng dịch vụ và dịch vụ nào cho khách tự đặt: sửa ở Thiết lập → Dịch vụ & giá.</p>
+    </div>`;
+  },
+
+  /* Thiết lập → Sao lưu. */
+  backup(d){
+    const l = d.last;
+    const kb = n => (n / 1024).toLocaleString('vi-VN', {maximumFractionDigits: 0}) + ' KB';
+    return `<div class="wrap">
+      ${head('Sao lưu dữ liệu', true)}
+      <div class="card ${l && l.ok && !l.error ? '' : 'mdwarn'}"><h3>Lần sao lưu gần nhất</h3>
+        ${l ? `<div><b>${new Date(l.at * 1000).toLocaleString('vi-VN')}</b> · ${l.ok ? esc(l.name) + ' · ' + kb(l.size) : 'không thành công'}
+          ${l.mailed ? ' · <span style="color:var(--ok)">✓ đã gửi Gmail</span>' : ''}</div>
+          ${l.error ? `<p style="color:var(--bad);margin:6px 0 0">${esc(l.error)}</p>` : ''}` : '<div style="color:var(--warn)">Chưa sao lưu lần nào.</div>'}
+        <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:12px">
+          <button class="btn sm pri" data-act="backupNow">Sao lưu ${d.mail_ready ? '& gửi Gmail ' : ''}ngay</button>
+          ${d.files.length ? `<button class="btn sm" data-act="backupGet" data-name="${esc(d.files[0].name)}">⬇ Tải bản mới nhất</button>` : ''}
+        </div></div>
+      <div class="card"><h3>Cài đặt gửi Gmail ${d.mail_ready && d.locked ? '<span class="badge" style="color:var(--ok)">✓ đã cài</span>' : '<span class="badge warn">chưa xong</span>'}</h3>
+        <ol class="steps">
+          <li class="${d.locked ? 'ok' : ''}">Mật khẩu khoá tệp sao lưu (<code>MH_BACKUP_PASS</code>) ${d.locked ? '✓' : '— chưa đặt'}</li>
+          <li class="${d.mail_ready ? 'ok' : ''}">Gmail gửi + Mật khẩu ứng dụng (<code>MH_SMTP_USER</code>, <code>MH_SMTP_PASS</code>), nơi nhận (<code>MH_BACKUP_TO</code>) ${d.mail_ready ? '✓ → ' + esc(d.to) : '— chưa đặt'}</li>
+        </ol>
+        <details><summary class="link" style="padding:0">Xem hướng dẫn từng bước</summary>
+          <ol class="guide">
+            <li>Vào <b>myaccount.google.com → Bảo mật</b>, bật <b>Xác minh 2 bước</b> (nếu chưa bật).</li>
+            <li>Tìm <b>"Mật khẩu ứng dụng"</b> (App passwords), tạo một mật khẩu tên "Hoi vien" → Google cho 16 chữ cái. Chép lại.</li>
+            <li>Trên Hostinger, mở <b>Trình quản lý tệp</b> → thư mục <code>memberhub-data</code> → sửa <code>config.php</code>, thêm:
+              <pre>define('MH_BACKUP_TO',   'gmail-nhận@gmail.com');
+define('MH_SMTP_USER',   'gmail-gửi@gmail.com');
+define('MH_SMTP_PASS',   '16 chữ vừa tạo');
+define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li>
+            <li>Quay lại đây bấm <b>Sao lưu & gửi Gmail ngay</b> — vài giây sau kiểm hộp thư.</li>
+            <li>Hostinger → <b>Nâng cao → Cron Jobs</b> → tạo lệnh chạy <b>mỗi ngày lúc 23:30</b>:
+              <pre>${esc(d.cron)}</pre></li>
+          </ol>
+          <p class="dim">Mở tệp sao lưu: dùng 7-Zip (Windows) hoặc Keka (Mac), nhập mật khẩu khoá tệp. Khi cần khôi phục, gửi tệp cho người cài app.</p>
+        </details></div>
+      ${d.files.length ? `<div class="card"><h3>Các bản trên máy chủ (giữ 30 bản gần nhất)</h3><div class="list">${d.files.map(f => `
+        <div class="item"><div class="grow"><b class="num">${esc(f.name)}</b><div class="sub">${new Date(f.at * 1000).toLocaleString('vi-VN')} · ${kb(f.size)}</div></div>
+          <button class="chip" data-act="backupGet" data-name="${esc(f.name)}">⬇ Tải</button></div>`).join('')}</div></div>` : ''}
+    </div>`;
   },
 
   /* ---------------- tài khoản thợ ---------------- */
@@ -1139,6 +1400,8 @@ const Views = {
         ${muc('go:programs', '🎁', 'Quà theo mốc', 'Mốc quà theo số lần cắt, uốn…')}
         ${muc('go:import', '📥', 'Nhập & đối soát KiotViet', 'Nạp lịch sử, tìm lượt quầy quên ghi hoặc ghi khống')}
         ${muc('go:barbers', '💈', 'Thợ cắt', 'Danh sách thợ, lương cứng, khách quen')}
+        ${muc('go:bookset', '📅', 'Đặt lịch', 'Giờ mở cửa, link cho khách tự đặt')}
+        ${muc('go:backup', '💾', 'Sao lưu dữ liệu', 'Mỗi đêm tự sao lưu, gửi vào Gmail')}
         ${muc('go:users', '👤', 'Tài khoản quầy & thợ', 'Tạo, đổi mật khẩu, tắt; tài khoản thợ xem hoá đơn của mình')}
         ${muc('go:audit', '📜', 'Nhật ký', 'Ai đã ghi, huỷ, trao quà lúc nào')}
         ${muc('go:password', '🔑', 'Đổi mật khẩu chủ')}
@@ -1157,6 +1420,10 @@ const Views = {
     const tong = d.tiers.reduce((a, t) => a + t.count, 0) || 1;
     return `<div class="wrap">
       ${head('Tổng quan', false, `<button class="chip" data-act="reload">↻</button>`)}
+      ${!d.last_backup || !d.last_backup.ok || d.last_backup.error || Date.now() / 1000 - d.last_backup.at > 36 * 3600
+        ? `<button class="note dashlink" data-act="go:backup" style="color:var(--warn);width:100%;text-align:left">💾 ${!d.last_backup ? 'Chưa sao lưu dữ liệu lần nào' : d.last_backup.error ? 'Sao lưu gần nhất bị lỗi: ' + esc(d.last_backup.error) : 'Đã hơn 1 ngày chưa sao lưu'} — bấm để xem ›</button>` : ''}
+      ${d.reports_open ? `<button class="note dashlink" data-act="tab" data-id="bills" style="color:var(--warn);width:100%;text-align:left">📣 ${d.reports_open} báo sai hoá đơn chờ xử lý ›</button>` : ''}
+      ${d.bookings_today ? `<button class="note dashlink" data-act="tab" data-id="sched" style="width:100%;text-align:left">📅 Hôm nay có ${d.bookings_today} lịch hẹn${d.unconfirmed ? ` · <b style="color:var(--warn)">${d.unconfirmed} lịch khách tự đặt chưa xác nhận</b>` : ''} ›</button>` : ''}
       <div class="stats">
         <div class="stat"><div class="n">${tienGon(d.today.amount)}</div><div class="l">doanh thu hôm nay · ${d.today.visits} HĐ</div></div>
         <div class="stat"><div class="n">${tienGon(d.month.amount)}</div><div class="l">doanh thu tháng này · ${d.month.visits} HĐ</div></div>
@@ -1429,12 +1696,14 @@ const Views = {
           <div><label>Mã KiotViet</label><input data-svc="${i}" data-f="kv_codes" value="${esc(s.kv_codes)}" autocapitalize="characters"></div>
           <div><label>Tiền công thợ / lượt (đ)</label><input inputmode="numeric" data-svc="${i}" data-f="wage" data-money value="${soTien(s.wage)}" placeholder="0"></div>
           <div><label>% hoa hồng cho thợ (trên tiền thực thu)</label><input inputmode="decimal" data-svc="${i}" data-f="comm_pct" value="${s.comm_pct || ''}" placeholder="vd. 15 (uốn), 12 (sản phẩm A)"></div>
+          <div><label>Thời gian làm (phút) — để xếp lịch hẹn</label><input inputmode="numeric" data-svc="${i}" data-f="duration" value="${s.duration || ''}" placeholder="vd. 45"></div>
         </div>
         <div style="margin-top:8px"><label>Chú thích cho nhân viên — hiện khi rê chuột vào dịch vụ ở màn Bán hàng</label>
           <textarea data-svc="${i}" data-f="note" rows="2" placeholder="vd. Gồm cắt + gội + cạo mặt, khoảng 45 phút">${esc(s.note || '')}</textarea></div>
         <div class="row" style="margin-top:8px;flex-wrap:wrap">
           <label class="check grow"><input type="checkbox" data-svc="${i}" data-f="active"${s.active ? ' checked' : ''}> Hiện ở quầy</label>
           <label class="check grow"><input type="checkbox" data-svc="${i}" data-f="discountable"${s.discountable ? ' checked' : ''}> Được giảm theo hạng / khuyến mãi</label>
+          <label class="check grow"><input type="checkbox" data-svc="${i}" data-f="bookable"${s.bookable ? ' checked' : ''}> Cho khách tự đặt online</label>
           <button class="link" data-act="svcUp" data-i="${i}">↑ Lên</button>
           <button class="link" data-act="svcAddIn" data-g="${esc(s.grp)}">+ Thêm vào nhóm này</button>
         </div>

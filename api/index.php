@@ -1475,7 +1475,11 @@ case 'dashboard': {
          return mhTierPublic($t) + ['count' => $tierCount[$t['id']] ?? 0]; }, mhTiers()),
        'pending' => array_slice($pending, 0, 60), 'pending_total' => array_sum(array_map(function ($p) { return count($p['gifts']); }, $pending)),
        'flagged' => $flagged, 'by_user' => $st->fetchAll(),
-       'last_import' => mhSetting('last_import', '')]);
+       'last_import' => mhSetting('last_import', ''),
+       'last_backup' => json_decode(mhSetting('last_backup', 'null'), true),
+       'reports_open' => (int)db()->query("SELECT COUNT(*) FROM bill_reports WHERE status = 'open'")->fetchColumn(),
+       'bookings_today' => (int)$q("SELECT COUNT(*) n FROM bookings WHERE book_date = ? AND status IN ('booked','arrived','done')", [$today])['n'],
+       'unconfirmed' => (int)$q("SELECT COUNT(*) n FROM bookings WHERE confirmed = 0 AND status = 'booked' AND book_date >= ?", [$today])['n']]);
 }
 
 /* ===== nhập file KiotViet =====

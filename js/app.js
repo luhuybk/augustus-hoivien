@@ -30,6 +30,7 @@ const App = {
   pos: null,              /* hoá đơn đang lập — giữ nguyên khi chuyển tab qua lại */
   pay: {open: 0},
   mine: {month: ''},
+  sched: {date: '', sel: 0, form: null, off: null},
   bills: {preset: 'today', from: '', to: '', q: '', barber: '', only: '', pay: '', src: '', limit: 200},
 
   get cur(){ return this.stack[this.stack.length - 1]; },
@@ -78,7 +79,7 @@ const App = {
     this.go(this.homeTab());
   },
 
-  homeTab(){ return API.isOwner() ? 'dash' : API.isBarber() ? 'mine' : 'pos'; },
+  homeTab(){ return API.isOwner() ? 'dash' : API.isBarber() ? 'bsched' : 'pos'; },
 
   applyMe(r){
     this.kinds = r.kinds; this.shop = r.shop; this.today = r.today; this.undoMinutes = r.undo_minutes;
@@ -88,11 +89,11 @@ const App = {
   /* ---------------- điều hướng ---------------- */
 
   tabs(){
-    if (API.isBarber()) return [['mine', '🧾', 'Hoá đơn của tôi'], ['more', '☰', 'Khác']];
+    if (API.isBarber()) return [['bsched', '📅', 'Lịch hẹn'], ['mine', '🧾', 'Hoá đơn'], ['more', '☰', 'Khác']];
     return API.isOwner()
-      ? [['pos', '💳', 'Bán hàng'], ['customers', '👥', 'Khách'], ['day', '📋', 'Sổ ngày'], ['bills', '🧾', 'Hoá đơn'],
+      ? [['pos', '💳', 'Bán hàng'], ['sched', '📅', 'Lịch hẹn'], ['customers', '👥', 'Khách'], ['day', '📋', 'Sổ ngày'], ['bills', '🧾', 'Hoá đơn'],
          ['dash', '📊', 'Tổng quan'], ['payroll', '💰', 'Lương'], ['more', '⚙︎', 'Thiết lập']]
-      : [['pos', '💳', 'Bán hàng'], ['lookup', '🔎', 'Tra khách'], ['day', '📋', 'Báo cáo'], ['more', '☰', 'Khác']];
+      : [['pos', '💳', 'Bán hàng'], ['sched', '📅', 'Lịch hẹn'], ['lookup', '🔎', 'Tra khách'], ['day', '📋', 'Báo cáo'], ['more', '☰', 'Khác']];
   },
 
   go(tab){ this.stack = [{name: tab}]; window.scrollTo(0, 0); return this.render(); },
@@ -161,6 +162,21 @@ const App = {
         view.innerHTML = Views.bills(this.bills, this.data.bills);
         break;
       }
+      case 'sched': {
+        if (!this.sched.date) this.sched.date = this.today;
+        this.data.sched = await API.call('book_day', {date: this.sched.date});
+        this.drawSched();
+        break;
+      }
+      case 'bsched':
+        view.innerHTML = Views.bookMine(await API.call('book_mine'));
+        break;
+      case 'bookset':
+        view.innerHTML = Views.bookSet((await API.call('book_day', {date: this.today})).cfg);
+        break;
+      case 'backup':
+        view.innerHTML = Views.backup(await API.call('backup_info'));
+        break;
       case 'mine': {
         this.data.mine = await API.call('my_bills', this.mine.month ? {month: this.mine.month} : {});
         this.mine.month = this.data.mine.month;
@@ -425,7 +441,7 @@ const App = {
                                       detail: (l.detail || '').trim()})),
       promo_id: st.promo || 0, mdisc_reason: st.mdReason,
       tip: st.tipN, pay_cash: cash, pay_transfer: tong - cash, note: st.note,
-      expect_total: q.total, date: API.isOwner() ? st.date : undefined, client_ref: st.ref});
+      expect_total: q.total, date: API.isOwner() ? st.date : undefined, client_ref: st.ref, booking_id: st.booking || 0});
     }catch(err){
       /* Giá / hạng / khuyến mãi vừa đổi ở máy khác: tải lại rồi vẽ lại để
          quầy thấy số mới, bấm thanh toán lần nữa. */
@@ -451,6 +467,97 @@ const App = {
     document.body.appendChild(f);
     f.contentDocument.open(); f.contentDocument.write(html); f.contentDocument.close();
     setTimeout(() => { f.contentWindow.focus(); f.contentWindow.print(); }, 250);
+  },
+
+  /* ---------------- lịch hẹn ---------------- */
+
+  drawSched(){
+    const y = window.scrollY;
+    $('#view').innerHTML = Views.sched(this.data.sched, this.sched);
+    window.scrollTo(0, y);
+  },
+
+  /* Chỉ vẽ lại khung form / chi tiết phía trên lưới — ô đang gõ giữ nguyên. */
+  drawSchedPanel(){
+    const p = $('#schedPanel'), d = this.data.sched, ui = this.sched;
+    if (!p) return;
+    const sel = d.rows.find(x => x.id === ui.sel);
+    p.innerHTML = ui.form ? Views.bookForm(ui.form, d) : ui.off ? Views.offForm(ui.off, d) : sel ? Views.bookDetail(sel, d) : '';
+  },
+
+  bookOpen(f){
+    this.sched.form = Object.assign({id: 0, date: this.sched.date || this.today, start: null, dur: 45, barber_id: 0,
+                                     customer: null, name: '', phone: '', services: [], note: '', q: '', rows: null, slots: null, busy: ''}, f);
+    this.sched.off = null;
+    this.drawSchedPanel();
+    const p = $('#schedPanel'); if (p) p.scrollIntoView({block: 'start', behavior: 'smooth'});
+    this.bookSlots();
+  },
+
+  /* Giờ trống theo ngày / thợ / thời gian đang chọn. */
+  async bookSlots(){
+    const f = this.sched.form;
+    if (!f) return;
+    const luot = this._bs = (this._bs || 0) + 1;
+    try{
+      const r = await API.call('book_slots', {date: f.date, dur: f.dur, barber_id: f.barber_id, id: f.id});
+      if (luot !== this._bs || this.sched.form !== f) return;
+      f.slots = r.slots;
+    }catch(e){ f.slots = []; }
+    const b = $('#bkSlots'); if (b) b.innerHTML = Views.bkSlots(f);
+  },
+
+  bookDurAuto(){
+    const f = this.sched.form, sv = this.data.sched.services;
+    const tong = f.services.reduce((a, id) => a + ((sv.find(x => x.id === id) || {}).duration || 30), 0);
+    f.dur = Math.max(15, Math.min(240, Math.ceil((tong || 45) / 15) * 15));
+  },
+
+  async bookSave(force){
+    const f = this.sched.form;
+    if (f.start == null) return toast('Chọn giờ.', 'bad');
+    const data = {id: f.id, date: f.date, start: f.start, dur: f.dur, barber_id: f.barber_id, services: f.services,
+                  note: f.note, force: force ? 1 : 0};
+    if (f.customer) data.customer_id = f.customer.id;
+    else if (!f.keepCus){ data.name = f.name.trim(); data.phone = f.phone.trim(); }
+    else data.name = f.name;
+    try{
+      await API.call('book_save', data);
+    }catch(e){
+      if (e.code === 'busy'){ f.busy = e.message + ' Chọn giờ / thợ khác, hoặc bấm "Vẫn đặt".'; return this.drawSchedPanel(); }
+      throw e;
+    }
+    toast(f.id ? 'Đã sửa lịch hẹn' : 'Đã đặt lịch ' + hm(f.start), 'ok');
+    this.sched.date = f.date;
+    this.sched.form = null;
+    return this.render();
+  },
+
+  /* Khách đến → màn Bán hàng điền sẵn khách, thợ, dịch vụ của lịch. */
+  async bookToPos(b){
+    if (b.status === 'booked') await API.call('book_status', {id: b.id, status: 'arrived'});
+    this.posReset();
+    Object.assign(this.pos, {barber: b.barber_id, booking: b.id, bookingLabel: hm(b.start) + ' · ' + (b.name || ''),
+                             lines: b.services.map(v => ({sid: v.id, qty: 1, price: 0}))});
+    await this.go('pos');
+    this.pos.lines = this.pos.lines.filter(l => (this.posData.services || []).some(x => x.id === l.sid));
+    if (b.customer_id) return this.posPick(b.customer_id);
+    Object.assign(this.pos, {newCus: true, newPhone: /^\d{10}$/.test(b.phone || '') ? b.phone : '', newName: b.name || ''});
+    this.drawPos();
+  },
+
+  /* Tải bản sao lưu: máy chủ trả thẳng tệp, không phải JSON. */
+  async backupGet(name){
+    const res = await fetch(API.url, {method: 'POST', headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + API.token},
+                                      body: JSON.stringify({action: 'backup_download', name, _t: API.token})});
+    if (!res.ok || (res.headers.get('Content-Type') || '').includes('json')){
+      let m = 'Không tải được.'; try{ m = (await res.json()).error || m; }catch(e){}
+      throw new Error(m);
+    }
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
   },
 
   /* Sổ hoá đơn: khoảng ngày nhanh, và hỏi máy chủ theo bộ lọc đang chọn. */
@@ -680,6 +787,84 @@ const App = {
           if (o.length) o[o.length - 1].focus();
           return;
         }
+        /* ----- lịch hẹn ----- */
+        case 'schedDay': {
+          const k = Number(el.dataset.d);
+          if (!k) this.sched.date = this.today;
+          else { const x = new Date(this.sched.date + 'T00:00:00'); x.setDate(x.getDate() + k);
+                 this.sched.date = x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0'); }
+          Object.assign(this.sched, {sel: 0, form: null, off: null});
+          return this.render();
+        }
+        case 'schedAt': {
+          /* Bấm chỗ trống trên cột thợ → đặt lịch đúng thợ, đúng giờ (làm tròn theo bước). */
+          if (e.target !== el && !e.target.classList.contains('sline')) return;
+          const c = this.data.sched.cfg, r = el.getBoundingClientRect();
+          const t = c.open + Math.floor((e.clientY - r.top) / 1.3 / c.step) * c.step;
+          return this.bookOpen({barber_id: Number(el.dataset.b), start: Math.max(c.open, Math.min(c.close - 15, t))});
+        }
+        case 'schedSel':
+          Object.assign(this.sched, {sel: id, form: null, off: null});
+          this.drawSched();
+          $('#schedPanel').scrollIntoView({block: 'start', behavior: 'smooth'});
+          return;
+        case 'schedClose': Object.assign(this.sched, {sel: 0, form: null, off: null}); return this.drawSched();
+        case 'bookNew':  return this.bookOpen({});
+        case 'offNew':   Object.assign(this.sched, {off: {date: this.sched.date}, form: null}); return this.drawSchedPanel();
+        case 'offDel':
+          if (!this.hoiLai(el, 'Bỏ?')) return;
+          await API.call('book_off_del', {id});
+          return this.render();
+        case 'bookEdit': {
+          const b = this.data.sched.rows.find(x => x.id === id);
+          return this.bookOpen({id: b.id, date: b.date, start: b.start, dur: b.dur, barber_id: b.any ? 0 : b.barber_id,
+                                services: b.services.map(v => v.id), note: b.note, keepCus: true, name: b.name, phone: b.phone});
+        }
+        case 'bookConfirm': case 'bookNoshow': case 'bookCancel': case 'bookBack': {
+          const st = {bookConfirm: 'confirm', bookNoshow: 'noshow', bookCancel: 'cancel', bookBack: 'booked'}[act];
+          if ((st === 'cancel' || st === 'noshow') && !this.hoiLai(el, 'Chắc chưa?')) return;
+          await API.call('book_status', {id, status: st});
+          toast({confirm: 'Đã xác nhận', noshow: 'Đã ghi không đến', cancel: 'Đã huỷ lịch', booked: 'Đã đặt lại'}[st], 'ok');
+          return this.render();
+        }
+        case 'bookToPos': {
+          const b = ((this.data.sched || {}).rows || []).concat(this.posData.bookings || []).find(x => x.id === id);
+          if (b) return this.bookToPos(b);
+          return;
+        }
+        case 'bkSvc': {
+          const f = this.sched.form, k = f.services.indexOf(id);
+          if (k >= 0) f.services.splice(k, 1); else f.services.push(id);
+          this.bookDurAuto(); f.busy = '';
+          this.drawSchedPanel();
+          return this.bookSlots();
+        }
+        case 'bkBarber': this.sched.form.barber_id = id; this.sched.form.busy = ''; this.drawSchedPanel(); return this.bookSlots();
+        case 'bkTime':   this.sched.form.start = Number(el.dataset.t); this.sched.form.busy = ''; return this.drawSchedPanel();
+        case 'bkPick': {
+          const f = this.sched.form, r = (f.rows || []).find(x => x.id === id);
+          f.customer = r; f.rows = null; f.q = '';
+          return this.drawSchedPanel();
+        }
+        case 'bkCusClear': Object.assign(this.sched.form, {customer: null, keepCus: false, name: '', phone: ''}); return this.drawSchedPanel();
+        case 'bkSave':
+          el.disabled = true;
+          return await this.bookSave(!!el.dataset.force);
+        case 'copyLink':
+          try{ await navigator.clipboard.writeText($('#bookLink').textContent); toast('Đã chép link', 'ok'); }
+          catch(err){ toast('Không chép được — bôi đen link rồi chép tay.', 'bad'); }
+          return;
+        case 'backupNow': {
+          el.disabled = true; el.textContent = 'Đang sao lưu…';
+          const r = (await API.call('backup_now', {mail: 1})).result;
+          toast(r.ok && !r.error ? 'Đã sao lưu' + (r.mailed ? ' & gửi Gmail' : '') : 'Sao lưu lỗi: ' + r.error, r.ok && !r.error ? 'ok' : 'bad');
+          return this.render();
+        }
+        case 'backupGet':
+          el.disabled = true;
+          await this.backupGet(el.dataset.name);
+          el.disabled = false;
+          return;
         /* Báo sai: mở ô ghi chú ngay trong chi tiết hoá đơn. */
         case 'repOpen': {
           const box = document.getElementById('rep' + el.dataset.k);
@@ -942,7 +1127,8 @@ const App = {
         case 'svcAdd': case 'svcAddIn': {
           const g = el.dataset.g || (this.data.svcGroups[0] || {}).code || 'A';
           this.data.svcEdit.push({id: 0, name: '', kind: g === 'D' ? 'product' : g === 'C' ? 'perm' : 'cut', price: 0, kv_codes: '',
-                                  active: 1, wage: 0, comm_pct: 0, discountable: g === 'D' ? 0 : 1, grp: g, note: ''});
+                                  active: 1, wage: 0, comm_pct: 0, discountable: g === 'D' ? 0 : 1, grp: g, note: '',
+                                  duration: g === 'D' ? 0 : g === 'B' ? 60 : g === 'C' ? 90 : 45, bookable: g === 'D' ? 0 : 1});
           return this.drawSvc();
         }
         case 'svcUp': {
@@ -1107,6 +1293,23 @@ const App = {
       }, 300);
       return;
     }
+    if (t.id === 'bkQ'){
+      const f = this.sched.form; f.q = t.value;
+      clearTimeout(this._tk);
+      const q = t.value.trim(), so = q.replace(/\D/g, '');
+      const go = so.length === 4 || so.length >= 10 || (/[^\d\s.\-]/.test(q) && q.length >= 2);
+      if (!q){ f.rows = null; f.err = ''; }
+      if (!go){ const b = $('#bkRes'); if (b) b.innerHTML = Views.bkResults(f); return; }
+      this._tk = setTimeout(async () => {
+        try{ f.rows = (await API.call('search', {q})).rows; f.err = ''; }catch(err){ f.rows = null; f.err = err.message; }
+        const b = $('#bkRes'); if (b) b.innerHTML = Views.bkResults(f);
+      }, 300);
+      return;
+    }
+    if (t.id === 'bkName' || t.id === 'bkPhone' || t.id === 'bkNote'){
+      this.sched.form[{bkName: 'name', bkPhone: 'phone', bkNote: 'note'}[t.id]] = t.value;
+      return;
+    }
     if (t.id === 'bQ'){
       this.bills.q = t.value; this.bills.limit = 200;
       clearTimeout(this._tb);
@@ -1167,6 +1370,17 @@ const App = {
     const t = e.target;
     if (t.id === 'kvFile' && t.files.length) return this.importFiles(t.files);
     if (t.id === 'dayPick'){ this.cur.date = t.value; return this.render(); }
+    if (t.id === 'schedDate' && t.value){ Object.assign(this.sched, {date: t.value, sel: 0, form: null, off: null}); return this.render(); }
+    if (/^bk(Dur|Date|Time)$/.test(t.id) && this.sched.form){
+      const f = this.sched.form;
+      if (t.id === 'bkDur') f.dur = Number(t.value);
+      if (t.id === 'bkDate' && t.value) f.date = t.value;
+      if (t.id === 'bkTime' && t.value){ const [h, m] = t.value.split(':').map(Number); f.start = h * 60 + m; }
+      f.busy = '';
+      this.drawSchedPanel();
+      if (t.id !== 'bkTime') this.bookSlots();
+      return;
+    }
     if (t.id === 'mineMonth' && t.value){ this.mine.month = t.value; return this.render(); }
     if (t.id === 'payMonth' && t.value){ this.cur.month = t.value; this.pay.open = 0; return this.render(); }
     if (t.id === 'roundStep' || t.id === 'roundMode'){
@@ -1215,7 +1429,7 @@ const App = {
       if (t.dataset.f === 'code') this.data.svcEdit.forEach(x => { if (x.grp === cu) x.grp = g.code; });
     } else if (t.dataset.svc){
       const row = this.data.svcEdit[Number(t.dataset.svc)];
-      row[t.dataset.f] = t.dataset.f === 'price' || t.dataset.f === 'wage' ? Number(String(val).replace(/\D/g, '')) || 0
+      row[t.dataset.f] = t.dataset.f === 'price' || t.dataset.f === 'wage' || t.dataset.f === 'duration' ? Number(String(val).replace(/\D/g, '')) || 0
         : t.dataset.f === 'comm_pct' ? Number(String(val).replace(',', '.')) || 0 : val;
     }
   },
@@ -1291,6 +1505,21 @@ const App = {
                                             cuts: n('cuts'), combo: n('combo'), chem: n('chem'), prod: n('prod')});
         toast('Đã lưu KPI', 'ok');
         return this.render();
+      }
+      if (f.id === 'offForm'){
+        const p = x => { if (!x) return null; const [h, m] = x.split(':').map(Number); return h * 60 + m; };
+        const r = await API.call('book_off_add', {barber_id: Number(v.barber_id), date: v.date,
+                                                  start: p(v.start) ?? 0, end: p(v.end) ?? 1440, note: v.note});
+        toast(r.clash ? `Đã lưu — ${r.clash} lịch hẹn rơi vào giờ nghỉ, nhớ dời / báo khách` : 'Đã lưu giờ nghỉ', r.clash ? 'bad' : 'ok');
+        this.sched.off = null; this.sched.date = v.date;
+        return this.render();
+      }
+      if (f.id === 'bookSetForm'){
+        await API.call('book_settings_save', {open: v.open, close: v.close, step: Number(v.step), days: Number(v.days),
+          notice: Number(v.notice), noshow_block: Number(v.noshow_block), msg: v.msg, online: f.online.checked ? 1 : 0,
+          closed_days: [...f.querySelectorAll('[name=cd]:checked')].map(x => Number(x.value))});
+        toast('Đã lưu cài đặt đặt lịch', 'ok');
+        return;
       }
       if (f.classList.contains('repForm')){
         await API.call('report_add', {visit_id: Number(f.dataset.vid) || 0, date: v.date || f.dataset.date || undefined, note: v.note});

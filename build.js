@@ -24,7 +24,7 @@ const read = p => fs.readFileSync(path.join(dir, p), 'utf8');
 const JS = ['js/api.js', 'js/kiotviet.js', 'js/views.js', 'js/app.js'];
 
 /* ---------- mã phiên bản: đổi khi và chỉ khi mã nguồn đổi ---------- */
-const srcFiles = ['index.html', 'css/style.css', ...JS];
+const srcFiles = ['index.html', 'datlich.html', 'css/style.css', 'js/book.js', ...JS];
 const VERSION = crypto.createHash('sha1')
   .update(srcFiles.map(read).join('\0')).digest('hex').slice(0, 8);
 
@@ -33,6 +33,7 @@ const VERSION = crypto.createHash('sha1')
    trên điện thoại nhân viên, lúc đó không có cách nào biết hỏng ở đâu. */
 try {
   new Function(JS.map(f => read(f)).join('\n;\n'));
+  new Function(read('js/book.js'));          // trang đặt lịch chạy riêng
 } catch (e) {
   console.error('\n✗ Mã JavaScript có lỗi cú pháp — chưa dựng gì cả:\n  ' + e.message + '\n');
   process.exit(1);
@@ -53,7 +54,11 @@ const copy = rel => put(rel, fs.readFileSync(path.join(dir, rel)));
 put('index.html', read('index.html').replace(
   /(href|src)="((?:css|js)\/[^"]+)"/g, (_, a, p) => `${a}="${p}?v=${VERSION}"`));
 
-for (const f of ['css/style.css', ...JS, 'manifest.webmanifest', 'icon.svg']) copy(f);
+/* Trang khách tự đặt lịch — công khai, không cần đăng nhập. */
+put('datlich.html', read('datlich.html').replace(
+  /(href|src)="((?:css|js)\/[^"]+)"/g, (_, a, p) => `${a}="${p}?v=${VERSION}"`));
+
+for (const f of ['css/style.css', ...JS, 'js/book.js', 'manifest.webmanifest', 'icon.svg']) copy(f);
 
 /* Phần máy chủ: mọi thứ trừ config.php và dữ liệu. */
 for (const f of ['index.php', 'lib.php', 'schema.sql', 'backup.php', '.htaccess']) copy('api/' + f);
@@ -90,7 +95,7 @@ put('.htaccess', `# Hội viên — cấu hình cho Apache/LiteSpeed (Hostinger)
     Header set Cache-Control "public, max-age=31536000, immutable"
   </FilesMatch>
   # index.html phải luôn hỏi lại máy chủ, không thì kẹt ở bản cũ
-  <FilesMatch "^(index\\.html|manifest\\.webmanifest)$">
+  <FilesMatch "^(index\\.html|datlich\\.html|manifest\\.webmanifest)$">
     Header set Cache-Control "no-cache, must-revalidate"
   </FilesMatch>
   Header set X-Robots-Tag "noindex, nofollow"

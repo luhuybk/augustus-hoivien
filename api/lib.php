@@ -172,7 +172,7 @@ function mhMigrate(PDO $pdo): void {
      được — uốn tuỳ tóc 1–2 tiếng thì quầy chỉnh lúc đặt). */
   if (mhAddColumn($pdo, 'services', 'duration', 'INTEGER NOT NULL DEFAULT 0'))
     $pdo->exec("UPDATE services SET duration = CASE
-                  WHEN kind = 'product' THEN 0 WHEN grp = 'B' THEN 60 WHEN kind = 'cut' THEN 45
+                  WHEN kind = 'product' THEN 0 WHEN grp = 'B' THEN 60 WHEN grp = 'C' THEN 90 WHEN kind = 'cut' THEN 45
                   WHEN kind IN ('perm', 'color') THEN 90 WHEN kind = 'care' THEN 15 ELSE 30 END");
   if (mhAddColumn($pdo, 'services', 'bookable', 'INTEGER NOT NULL DEFAULT 1'))
     $pdo->exec("UPDATE services SET bookable = 0 WHERE kind = 'product'");
@@ -1195,8 +1195,8 @@ function mhShiftCalc(string $date, int $opening): array {
    những thứ trong tuần quán nghỉ (0 = CN), lời nhắn trên trang đặt lịch. */
 function mhBookCfg(): array {
   $hm = function (string $s, int $mac) { return preg_match('/^(\d{1,2}):(\d{2})$/', $s, $m) ? (int)$m[1] * 60 + (int)$m[2] : $mac; };
-  $nghi = array_values(array_filter(array_map('intval', explode(',', mhSetting('book_closed_days', ''))),
-                                    function ($d) { return $d >= 0 && $d <= 6; }));
+  $nghi = array_values(array_map('intval', array_filter(explode(',', mhSetting('book_closed_days', '')),
+                                                       function ($d) { return preg_match('/^[0-6]$/', trim($d)); })));
   return ['open' => $hm(mhSetting('book_open', '09:00'), 540), 'close' => $hm(mhSetting('book_close', '20:00'), 1200),
           'step' => in_array((int)mhSetting('book_step', '15'), [15, 30], true) ? (int)mhSetting('book_step', '15') : 15,
           'online' => mhSetting('book_online', '1') === '1', 'days' => max(1, min(60, (int)mhSetting('book_days', '14'))),
@@ -1380,7 +1380,9 @@ function mhSmtpSend(string $to, string $subject, string $text, ?string $file = n
   $nhan = array_values(array_filter(array_map('trim', explode(',', $to))));
   if (!$nhan) throw new RuntimeException('Chưa có địa chỉ nhận.');
 
-  $fp = @stream_socket_client(($port === 465 ? 'ssl://' : 'tcp://') . "$host:$port", $eno, $estr, 20);
+  /* ssl = cổng 465 (Gmail), tls = STARTTLS cổng 587, none = chỉ để thử trên máy. */
+  $kieu = defined('MH_SMTP_SECURE') ? MH_SMTP_SECURE : ($port === 465 ? 'ssl' : 'tls');
+  $fp = @stream_socket_client(($kieu === 'ssl' ? 'ssl://' : 'tcp://') . "$host:$port", $eno, $estr, 20);
   if (!$fp) throw new RuntimeException("Không nối được tới $host:$port ($estr).");
   stream_set_timeout($fp, 30);
   $doc = function () use ($fp) {
@@ -1398,7 +1400,7 @@ function mhSmtpSend(string $to, string $subject, string $text, ?string $file = n
   try {
     $lenh(null, [220]);
     $lenh('EHLO memberhub', [250]);
-    if ($port !== 465) {
+    if ($kieu === 'tls') {
       $lenh('STARTTLS', [220]);
       if (!stream_socket_enable_crypto($fp, true, STREAM_CRYPTO_METHOD_TLS_CLIENT)) throw new RuntimeException('Không bật được TLS.');
       $lenh('EHLO memberhub', [250]);
