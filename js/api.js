@@ -34,6 +34,7 @@ const API = {
   },
 
   isOwner(){ return !!this.user && this.user.role === 'owner'; },
+  isBarber(){ return !!this.user && this.user.role === 'barber'; },
 
   /* Ném lỗi kèm câu tiếng Việt của máy chủ — chỗ gọi chỉ việc hiện ra.
      err.code / err.data giữ lại để chỗ gọi xử lý riêng vài trường hợp

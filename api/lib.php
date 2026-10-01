@@ -125,6 +125,58 @@ function mhMigrate(PDO $pdo): void {
   }
   $pdo->exec('CREATE INDEX IF NOT EXISTS idx_visit_barber ON visits(barber_id, visit_date)');
 
+  /* Bán hàng thay KiotViet: hoá đơn có giảm giá, tip, cách trả tiền; dịch
+     vụ có phần của thợ; hạng có % giảm. */
+  foreach (['subtotal' => 'INTEGER NOT NULL DEFAULT 0', 'discount' => 'INTEGER NOT NULL DEFAULT 0',
+            'disc_note' => "TEXT NOT NULL DEFAULT ''", 'tip' => 'INTEGER NOT NULL DEFAULT 0',
+            'pay_cash' => 'INTEGER NOT NULL DEFAULT 0', 'pay_transfer' => 'INTEGER NOT NULL DEFAULT 0'] as $cot => $kieu)
+    mhAddColumn($pdo, 'visits', $cot, $kieu);
+  mhAddColumn($pdo, 'visit_items', 'list_price', 'INTEGER NOT NULL DEFAULT 0');
+  mhAddColumn($pdo, 'visit_items', 'disc', 'INTEGER NOT NULL DEFAULT 0');
+  mhAddColumn($pdo, 'barbers', 'base_salary', 'INTEGER NOT NULL DEFAULT 0');
+  mhAddColumn($pdo, 'services', 'wage', 'INTEGER NOT NULL DEFAULT 0');
+  mhAddColumn($pdo, 'services', 'comm_pct', 'REAL NOT NULL DEFAULT 0');
+  /* Sản phẩm bán lẻ mặc định không giảm theo hạng — chủ bật lại được. */
+  if (mhAddColumn($pdo, 'services', 'discountable', 'INTEGER NOT NULL DEFAULT 1'))
+    $pdo->exec("UPDATE services SET discountable = 0 WHERE kind = 'product'");
+  /* Mức giảm chủ quán đưa ra: Đồng 5% · Bạc 10% · Vàng 15% · Đen 20%. Dòng
+     đặc quyền "Giảm …% sản phẩm" gợi ý từ bản đầu thì bỏ — giờ giảm giá là
+     con số thật app tự trừ, hiện riêng. */
+  if (mhAddColumn($pdo, 'tiers', 'disc_pct', 'INTEGER NOT NULL DEFAULT 0')) {
+    $pdo->exec("UPDATE tiers SET disc_pct = CASE name WHEN 'Đồng' THEN 5 WHEN 'Bạc' THEN 10
+                  WHEN 'Vàng' THEN 15 WHEN 'Đen' THEN 20 ELSE 0 END");
+    foreach (['Giảm 5% sản phẩm', 'Giảm 10% sản phẩm', 'Giảm 12% sản phẩm'] as $cu)
+      $pdo->prepare("UPDATE tiers SET perks = TRIM(REPLACE(REPLACE(perks, ? || char(10), ''), ?, ''), char(10))")
+          ->execute([$cu, $cu]);
+  }
+  mhVisitsNullableCustomer($pdo, $sql);
+  mhAddColumn($pdo, 'services', 'note', "TEXT NOT NULL DEFAULT ''");
+  mhAddColumn($pdo, 'payroll_adjust', 'qty', 'INTEGER NOT NULL DEFAULT 1');
+  mhAddColumn($pdo, 'payroll_adjust', 'rate', 'INTEGER NOT NULL DEFAULT 0');
+  mhAddColumn($pdo, 'payroll_adjust', 'recurring', 'INTEGER NOT NULL DEFAULT 0');
+  if (mhAddColumn($pdo, 'services', 'grp', "TEXT NOT NULL DEFAULT 'A'")) mhSeedGroups($pdo);
+  /* Giảm thêm bằng tay trên từng món (uốn giảm thẳng 100k…), không theo
+     hạng — bắt buộc ghi lý do, hiện ⚠ trong sổ ngày cho chủ soát. */
+  mhAddColumn($pdo, 'visits', 'mdisc', 'INTEGER NOT NULL DEFAULT 0');
+  mhAddColumn($pdo, 'visits', 'mdisc_note', "TEXT NOT NULL DEFAULT ''");
+  mhAddColumn($pdo, 'visit_items', 'mdisc', 'INTEGER NOT NULL DEFAULT 0');
+  /* Tên sản phẩm cụ thể trên dòng "Sản phẩm A – 12%"; tài khoản thợ. */
+  mhAddColumn($pdo, 'visit_items', 'detail', "TEXT NOT NULL DEFAULT ''");
+  mhAddColumn($pdo, 'users', 'barber_id', 'INTEGER');
+  /* Mạng chập chờn: máy chủ đã ghi hoá đơn nhưng quầy không nhận được trả
+     lời, bấm lại → nhận lại đúng hoá đơn cũ thay vì tạo hoá đơn thứ hai. */
+  mhAddColumn($pdo, 'visits', 'client_ref', 'TEXT');
+  $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_visit_ref ON visits(client_ref) WHERE client_ref IS NOT NULL');
+  /* Đặt lịch: mỗi dịch vụ mất bao lâu (phút) và có cho khách tự đặt không.
+     Đặt sẵn theo lời chủ quán: cắt 45', combo 60', uốn / nhuộm 90' (sửa
+     được — uốn tuỳ tóc 1–2 tiếng thì quầy chỉnh lúc đặt). */
+  if (mhAddColumn($pdo, 'services', 'duration', 'INTEGER NOT NULL DEFAULT 0'))
+    $pdo->exec("UPDATE services SET duration = CASE
+                  WHEN kind = 'product' THEN 0 WHEN grp = 'B' THEN 60 WHEN grp = 'C' THEN 90 WHEN kind = 'cut' THEN 45
+                  WHEN kind IN ('perm', 'color') THEN 90 WHEN kind = 'care' THEN 15 ELSE 30 END");
+  if (mhAddColumn($pdo, 'services', 'bookable', 'INTEGER NOT NULL DEFAULT 1'))
+    $pdo->exec("UPDATE services SET bookable = 0 WHERE kind = 'product'");
+
   if ((int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn() > 0) {
     mhSyncOwnerFromConfig($pdo);
     return;
@@ -139,7 +191,8 @@ function mhMigrate(PDO $pdo): void {
   $pdo->prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('owner_pass_config', ?)")
       ->execute([hash('sha256', MH_OWNER_PASS . '|' . mb_strtolower(MH_OWNER_USER))]);
 
-  $sv = $pdo->prepare('INSERT INTO services (name, kind, price, kv_codes, sort) VALUES (?,?,?,?,?)');
+  $sv = $pdo->prepare("INSERT INTO services (name, kind, price, kv_codes, sort, discountable)
+                       VALUES (?,?,?,?,?, CASE WHEN ? = 'product' THEN 0 ELSE 1 END)");
   $i = 0;
   foreach ([
     ['Premium Haircut',          'cut',     120000, 'HC'],
@@ -158,16 +211,17 @@ function mhMigrate(PDO $pdo): void {
     ['Cạo mặt',                  'care',     70000, 'SP000096'],
     ['Lấy ráy tai',              'care',     90000, 'SP000095,SP000101'],
     ['Sản phẩm',                 'product',      0, 'SP000084,SP000085,SP000089'],
-  ] as $s) $sv->execute([$s[0], $s[1], $s[2], $s[3], ++$i]);
+  ] as $s) $sv->execute([$s[0], $s[1], $s[2], $s[3], ++$i, $s[1]]);
+  mhSeedGroups($pdo);
 
-  $t = $pdo->prepare("INSERT INTO tiers (name, color, min_cuts, min_spend, perks, sort, bday_gift)
-                      VALUES (?,?,?,?,?,?, CASE WHEN ? IN ('Vàng','Đen') THEN 'Quà sinh nhật' ELSE '' END)");
+  $t = $pdo->prepare("INSERT INTO tiers (name, color, min_cuts, min_spend, perks, sort, disc_pct, bday_gift)
+                      VALUES (?,?,?,?,?,?,?, CASE WHEN ? IN ('Vàng','Đen') THEN 'Quà sinh nhật' ELSE '' END)");
   /* Đặc quyền chỉ là gợi ý để quầy có cái mà nói với khách — chủ sửa ở
      Thiết lập → Hạng. Mỗi dòng một điều. */
-  $t->execute(['Đồng', '#b87333', 0,  0,       "Tích lượt nhận quà mốc 3 – 7 – 10\nTặng tinh dầu mỗi lần uốn", 1, 'Đồng']);
-  $t->execute(['Bạc',  '#aab4c3', 5,  1000000, "Giảm 5% sản phẩm", 2, 'Bạc']);
-  $t->execute(['Vàng', '#e2b33c', 10, 2000000, "Giảm 10% sản phẩm\nƯu tiên đặt lịch giờ cao điểm", 3, 'Vàng']);
-  $t->execute(['Đen',  '#1b1b1f', 15, 3500000, "Giảm 12% sản phẩm\nƯu tiên đặt lịch giờ cao điểm", 4, 'Đen']);
+  $t->execute(['Đồng', '#b87333', 0,  0,       "Tích lượt nhận quà mốc 3 – 7 – 10\nTặng tinh dầu mỗi lần uốn", 1, 5, 'Đồng']);
+  $t->execute(['Bạc',  '#aab4c3', 5,  1000000, '', 2, 10, 'Bạc']);
+  $t->execute(['Vàng', '#e2b33c', 10, 2000000, "Ưu tiên đặt lịch giờ cao điểm", 3, 15, 'Vàng']);
+  $t->execute(['Đen',  '#1b1b1f', 15, 3500000, "Ưu tiên đặt lịch giờ cao điểm", 4, 20, 'Đen']);
 
   $p = $pdo->prepare('INSERT INTO programs (name, kind, steps, repeat, start_date, sort, created_at)
                       VALUES (?,?,?,?,?,?,?)');
@@ -208,6 +262,93 @@ function mhSyncOwnerFromConfig(PDO $pdo): void {
   $pdo->prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('owner_pass_config', ?)")->execute([$dau]);
   $pdo->prepare('INSERT INTO audit_log (user_id, action, detail, ip, created_at) VALUES (?,?,?,?,?)')
       ->execute([$id, 'owner_reset', 'Mật khẩu chủ đặt lại từ config.php', (string)($_SERVER['REMOTE_ADDR'] ?? ''), time()]);
+}
+
+/* Xếp dịch vụ vào nhóm, và — nếu chủ chưa đặt tiền công nào — đặt sẵn
+   theo bảng lương quán đang tính tay (tháng 8/2026): đầu cắt 50k, Combo
+   Shine 90k, Combo Chill 85k, Chill & Shine 125k, ráy tai 35k, em bé 30k,
+   uốn 15% doanh thu; sản phẩm tách A 12% · B 20% · C 25% · S 50% theo đúng
+   mã hàng KiotViet. Chỉ chạy một lần, lúc thêm cột nhóm. */
+function mhSeedGroups(PDO $pdo): void {
+  $rows = $pdo->query('SELECT * FROM services ORDER BY sort, id')->fetchAll();
+  $up = $pdo->prepare('UPDATE services SET grp = ? WHERE id = ?');
+  foreach ($rows as $r) {
+    $f = mhFold((string)$r['name']);
+    $g = $r['kind'] === 'product' ? 'D'
+       : (in_array($r['kind'], ['perm', 'color'], true) || preg_match('/phuc hoi|tay toc|ep side|uon|nhuom/', $f) ? 'C'
+       : (str_contains($f, 'combo') ? 'B' : 'A'));
+    $up->execute([$g, $r['id']]);
+  }
+  if ((int)$pdo->query('SELECT COUNT(*) FROM services WHERE wage > 0 OR comm_pct > 0')->fetchColumn() > 0) return;
+  $set = $pdo->prepare('UPDATE services SET wage = ?, comm_pct = ? WHERE id = ?');
+  foreach ($rows as $r) {
+    $f = mhFold((string)$r['name']);
+    $w = 0; $c = 0;
+    if (str_contains($f, 'chill & shine') || str_contains($f, 'chill and shine')) $w = 125000;
+    elseif (str_contains($f, 'combo shine')) $w = 90000;
+    elseif (str_contains($f, 'combo chill')) $w = 85000;
+    elseif (str_contains($f, 'baby') || str_contains($f, 'em be')) $w = 30000;
+    elseif (str_contains($f, 'ray tai')) $w = 35000;
+    elseif ($r['kind'] === 'cut') $w = 50000;
+    elseif (str_contains($f, 'uon') || str_contains($f, 'curl')) $c = 15;
+    if ($w || $c) $set->execute([$w, $c, $r['id']]);
+  }
+  /* "Sản phẩm" chung một dòng (mã KiotViet A, B, C gộp lại) → mỗi mức
+     hoa hồng một dòng. */
+  $sp = null;
+  foreach ($rows as $r) if ($r['kind'] === 'product' && str_contains(strtoupper((string)$r['kv_codes']), 'SP000084')) $sp = $r;
+  if ($sp) {
+    $pdo->prepare("UPDATE services SET name = 'Sản phẩm A – 12%', kv_codes = 'SP000084', comm_pct = 12, grp = 'D' WHERE id = ?")
+        ->execute([$sp['id']]);
+    $ins = $pdo->prepare("INSERT INTO services (name, kind, price, kv_codes, active, sort, wage, comm_pct, discountable, grp)
+                          VALUES (?, 'product', 0, ?, 1, ?, 0, ?, 0, 'D')");
+    $sort = (int)$sp['sort'];
+    foreach ([['Sản phẩm B – 20%', 'SP000085', 20], ['Sản phẩm C – 25%', 'SP000089', 25], ['Sản phẩm S – 50%', '', 50]] as $k)
+      $ins->execute([$k[0], $k[1], $sort, $k[2]]);
+    /* Dòng hàng đã nhập theo mã B, C chuyển sang dịch vụ mới. */
+    $re = $pdo->prepare('UPDATE visit_items SET service_id = (SELECT id FROM services WHERE kv_codes = ? LIMIT 1) WHERE kv_code = ?');
+    foreach (['SP000085', 'SP000089'] as $code) $re->execute([$code, $code]);
+  }
+}
+
+/* Nhóm dịch vụ — chủ đổi tên, thêm nhóm ở Thiết lập → Dịch vụ. */
+function mhGroups(): array {
+  $g = json_decode((string)mhSetting('svc_groups', ''), true);
+  if (!is_array($g) || !$g)
+    $g = [['code' => 'A', 'name' => 'Dịch vụ lẻ'], ['code' => 'B', 'name' => 'Combo'],
+          ['code' => 'C', 'name' => 'Hoá chất'], ['code' => 'D', 'name' => 'Sản phẩm']];
+  return $g;
+}
+
+/* Bản đầu bắt mọi lượt phải có khách (customer_id NOT NULL). Bán hàng thì
+   có khách lẻ không để số — SQLite không sửa được ràng buộc cột, phải dựng
+   lại bảng: tạo bảng mới theo schema.sql, chép dữ liệu, đổi tên. Tắt khoá
+   ngoại trong lúc làm để xoá bảng cũ không kéo theo visit_items. */
+function mhVisitsNullableCustomer(PDO $pdo, string $schema): void {
+  $cols = $pdo->query('PRAGMA table_info(visits)')->fetchAll();
+  $can = false;
+  foreach ($cols as $c) if ($c['name'] === 'customer_id' && (int)$c['notnull'] === 1) $can = true;
+  if (!$can) return;
+  if (!preg_match('/CREATE TABLE IF NOT EXISTS visits \((.*?)\n\);/s', $schema, $m))
+    mhFail('schema.sql thiếu bảng visits.', 500);
+  $ten = implode(', ', array_map(function ($c) { return $c['name']; }, $cols));
+  $pdo->exec('PRAGMA foreign_keys = OFF');
+  $pdo->beginTransaction();
+  try {
+    $pdo->exec('DROP TABLE IF EXISTS visits_new');
+    $pdo->exec("CREATE TABLE visits_new ({$m[1]}\n)");
+    $pdo->exec("INSERT INTO visits_new ($ten) SELECT $ten FROM visits");
+    $pdo->exec('DROP TABLE visits');
+    $pdo->exec('ALTER TABLE visits_new RENAME TO visits');
+    $pdo->exec($schema);                       // dựng lại chỉ mục
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_visit_barber ON visits(barber_id, visit_date)');
+    $pdo->commit();
+  } catch (Throwable $e) {
+    $pdo->rollBack();
+    $pdo->exec('PRAGMA foreign_keys = ON');
+    mhFail('Nâng cấp bảng hoá đơn không được: ' . $e->getMessage(), 500);
+  }
+  $pdo->exec('PRAGMA foreign_keys = ON');
 }
 
 /* Trả về true nếu vừa thêm cột (để bên gọi điền giá trị ban đầu). */
@@ -310,11 +451,18 @@ function mhCurrentUser(): ?array {
   if (!$row) return null;
   db()->prepare('UPDATE sessions SET last_seen = ? WHERE token_hash = ?')->execute([time(), $row['token_hash']]);
   $row['id'] = (int)$row['id'];
+  $row['barber_id'] = $row['barber_id'] !== null ? (int)$row['barber_id'] : null;
   return $row;
 }
 
+/* Tài khoản thợ chỉ được xem hoá đơn của chính mình và báo sai — mọi lệnh
+   khác (tính tiền, tra khách, chốt ca…) chặn ngay ở cửa. */
+const MH_BARBER_ACTIONS = ['me', 'logout', 'my_bills', 'report_add', 'book_mine'];
+
 function mhRequireUser(): array {
   $u = mhCurrentUser();
+  if ($u && $u['role'] === 'barber' && !in_array($GLOBALS['action'] ?? '', MH_BARBER_ACTIONS, true))
+    mhFail('Tài khoản thợ chỉ xem được hoá đơn của mình.', 403);
   if (!$u) {
     /* Mã riêng cho "hết phiên": 401 còn dùng cho "sai mật khẩu", mà gõ
        nhầm một lần rồi bị văng ra ngoài thì vô lý. */
@@ -365,7 +513,7 @@ function mhTiers(): array {
   $rows = db()->query('SELECT * FROM tiers ORDER BY sort, id')->fetchAll();
   foreach ($rows as &$t) {
     $t['id'] = (int)$t['id']; $t['min_cuts'] = (int)$t['min_cuts'];
-    $t['min_spend'] = (int)$t['min_spend']; $t['sort'] = (int)$t['sort'];
+    $t['min_spend'] = (int)$t['min_spend']; $t['sort'] = (int)$t['sort']; $t['disc_pct'] = (int)$t['disc_pct'];
   }
   unset($t);
   return $rows;
@@ -402,7 +550,8 @@ function mhTierOf(int $cuts, int $spend, array $tiers): array {
 
 function mhTierPublic(array $t): array {
   return ['id' => $t['id'], 'name' => $t['name'], 'color' => $t['color'], 'perks' => $t['perks'],
-          'min_cuts' => $t['min_cuts'], 'min_spend' => $t['min_spend'], 'bday_gift' => $t['bday_gift'] ?? ''];
+          'min_cuts' => $t['min_cuts'], 'min_spend' => $t['min_spend'], 'bday_gift' => $t['bday_gift'] ?? '',
+          'disc_pct' => (int)($t['disc_pct'] ?? 0)];
 }
 
 /* ============================================================
@@ -457,7 +606,7 @@ function mhStats(?int $cid = null): array {
                           THEN 1 ELSE 0 END) AS cuts,
                  MAX(v.visit_date) AS last
             FROM visits v
-           WHERE v.void_at IS NULL" . ($cid ? ' AND v.customer_id = ?' : '') . "
+           WHERE v.void_at IS NULL AND v.customer_id IS NOT NULL" . ($cid ? ' AND v.customer_id = ?' : '') . "
            GROUP BY v.customer_id";
   $st = db()->prepare($sql);
   $st->execute($cid ? [$cid] : []);
@@ -495,7 +644,7 @@ function mhPrograms(bool $activeOnly = true): array {
    khoảng ngày của chương trình, chưa huỷ. Trả về [customer_id => số lượt]. */
 function mhProgramCounts(array $p, ?int $cid = null): array {
   $sql = 'SELECT v.customer_id AS cid, COUNT(*) AS n FROM visits v
-           WHERE v.void_at IS NULL AND v.visit_date >= ?';
+           WHERE v.void_at IS NULL AND v.customer_id IS NOT NULL AND v.visit_date >= ?';
   $args = [$p['start_date']];
   if ($p['end_date'] !== '') { $sql .= ' AND v.visit_date <= ?'; $args[] = $p['end_date']; }
   if ($p['kind'] !== 'any') {
@@ -654,6 +803,8 @@ function mhBarberFromKv(string $raw, array &$cache, array &$moi): ?int {
   $ten = mhCleanKvName($raw);
   if ($ten === '') return null;
   $k = mhFold($ten);
+  /* Hoá đơn tài khoản quầy tự đứng tên "người bán" (tên quán) — không phải thợ. */
+  if ($k === mhFold(MH_SHOP_NAME)) return null;
   if (!$cache) foreach (mhBarbers() as $b) {
     $cache[mhFold($b['kv_name'] !== '' ? $b['kv_name'] : $b['name'])] = $b['id'];
     $cache += [mhFold($b['name']) => $b['id']];
@@ -685,7 +836,7 @@ function mhCustomerBarbers(int $cid): array {
 function mhMainBarbers(): array {
   $ra = [];
   foreach (db()->query('SELECT customer_id, barber_id, COUNT(*) n, MAX(visit_date) last FROM visits
-                         WHERE void_at IS NULL AND barber_id IS NOT NULL
+                         WHERE void_at IS NULL AND barber_id IS NOT NULL AND customer_id IS NOT NULL
                          GROUP BY customer_id, barber_id ORDER BY n, last')->fetchAll() as $r)
     $ra[(int)$r['customer_id']] = (int)$r['barber_id'];     // sắp tăng dần → dòng cuối thắng
   return $ra;
@@ -725,7 +876,7 @@ function mhVisitList(string $where, array $args, int $limit = 200): array {
   $st = db()->prepare("SELECT v.*, u.name AS by_name, vu.name AS void_by_name,
                               c.name AS customer_name, c.phone AS customer_phone, b.name AS barber_name
                          FROM visits v
-                         JOIN customers c ON c.id = v.customer_id
+                    LEFT JOIN customers c ON c.id = v.customer_id
                     LEFT JOIN barbers b ON b.id = v.barber_id
                     LEFT JOIN users u  ON u.id  = v.created_by
                     LEFT JOIN users vu ON vu.id = v.void_by
@@ -737,20 +888,554 @@ function mhVisitList(string $where, array $args, int $limit = 200): array {
   if (!$rows) return [];
   $ids = array_map(function ($r) { return (int)$r['id']; }, $rows);
   $items = [];
-  $q = db()->query('SELECT visit_id, name, kind, qty, price FROM visit_items WHERE visit_id IN ('
+  $q = db()->query('SELECT visit_id, service_id, name, kind, qty, price, list_price, disc, mdisc, detail FROM visit_items WHERE visit_id IN ('
                    . implode(',', $ids) . ') ORDER BY id');
   foreach ($q->fetchAll() as $i)
-    $items[(int)$i['visit_id']][] = ['name' => $i['name'], 'kind' => $i['kind'],
-                                     'qty' => (int)$i['qty'], 'price' => (int)$i['price']];
+    $items[(int)$i['visit_id']][] = ['name' => $i['name'], 'kind' => $i['kind'], 'service_id' => $i['service_id'] !== null ? (int)$i['service_id'] : null,
+                                     'qty' => (int)$i['qty'], 'price' => (int)$i['price'],
+                                     'list_price' => (int)$i['list_price'], 'disc' => (int)$i['disc'], 'mdisc' => (int)$i['mdisc'],
+                                     'detail' => (string)$i['detail']];
+  /* Báo sai đính kèm từng hoá đơn. */
+  $bao = [];
+  $q = db()->query('SELECT r.*, u.name AS by_name, ru.name AS res_name FROM bill_reports r
+                      LEFT JOIN users u ON u.id = r.created_by LEFT JOIN users ru ON ru.id = r.resolved_by
+                     WHERE r.visit_id IN (' . implode(',', $ids) . ') ORDER BY r.id');
+  foreach ($q->fetchAll() as $b) $bao[(int)$b['visit_id']][] = mhReportRow($b);
   foreach ($rows as &$r) {
-    $r['id'] = (int)$r['id']; $r['customer_id'] = (int)$r['customer_id'];
-    $r['amount'] = (int)$r['amount']; $r['created_at'] = (int)$r['created_at'];
+    $r['id'] = (int)$r['id']; $r['customer_id'] = $r['customer_id'] !== null ? (int)$r['customer_id'] : null;
+    $r['code'] = mhBillCode($r);
+    foreach (['amount', 'subtotal', 'discount', 'tip', 'pay_cash', 'pay_transfer', 'mdisc'] as $k) $r[$k] = (int)$r[$k];
+    $r['created_at'] = (int)$r['created_at'];
     $r['created_by'] = $r['created_by'] !== null ? (int)$r['created_by'] : null;
     $r['barber_id'] = $r['barber_id'] !== null ? (int)$r['barber_id'] : null;
     $r['void_at'] = $r['void_at'] !== null ? (int)$r['void_at'] : null;
     $r['items'] = $items[$r['id']] ?? [];
+    $r['reports'] = $bao[$r['id']] ?? [];
     $r['flags'] = array_values(array_filter(explode(',', (string)$r['flags'])));
   }
   unset($r);
   return $rows;
+}
+
+/* Tên sản phẩm cụ thể đã bán theo từng dòng sản phẩm, hay bán nhất trước,
+   kèm giá lần bán gần nhất — quầy chọn lại cho nhanh, giá tự điền. */
+function mhProductNames(): array {
+  $st = db()->prepare("SELECT i.service_id sid, i.detail d, COUNT(*) n, MAX(i.id) last FROM visit_items i
+                         JOIN visits v ON v.id = i.visit_id
+                        WHERE i.detail <> '' AND i.service_id IS NOT NULL AND v.void_at IS NULL AND v.visit_date >= ?
+                        GROUP BY i.service_id, i.detail ORDER BY n DESC");
+  $st->execute([date('Y-m-d', strtotime('-365 days'))]);
+  $rows = $st->fetchAll();
+  $gia = [];
+  if ($rows) foreach (db()->query('SELECT id, list_price FROM visit_items WHERE id IN ('
+                                  . implode(',', array_map(function ($r) { return (int)$r['last']; }, $rows)) . ')')->fetchAll() as $r)
+    $gia[(int)$r['id']] = (int)$r['list_price'];
+  $ra = [];
+  foreach ($rows as $r) {
+    $sid = (int)$r['sid'];
+    if (count($ra[$sid] ?? []) >= 40) continue;
+    $ra[$sid][] = ['name' => $r['d'], 'price' => $gia[(int)$r['last']] ?? 0];
+  }
+  return $ra;
+}
+
+function mhReportRow(array $b): array {
+  return ['id' => (int)$b['id'], 'visit_id' => $b['visit_id'] !== null ? (int)$b['visit_id'] : null,
+          'date' => $b['report_date'], 'note' => $b['note'], 'status' => $b['status'], 'reply' => $b['reply'],
+          'by' => $b['by_name'] ?? null, 'at' => (int)$b['created_at'], 'created_by' => $b['created_by'] !== null ? (int)$b['created_by'] : null,
+          'res_by' => $b['res_name'] ?? null, 'res_at' => $b['resolved_at'] !== null ? (int)$b['resolved_at'] : null];
+}
+
+/* Mã hoá đơn để hiện và in: hoá đơn nhập từ KiotViet giữ mã bên đó
+   (HD012586), hoá đơn app tạo là "AG" + số thứ tự. */
+function mhBillCode(array $v): string {
+  if (!empty($v['kv_invoice'])) return (string)$v['kv_invoice'];
+  return 'AG' . str_pad((string)$v['id'], 6, '0', STR_PAD_LEFT);
+}
+
+/* ============================================================
+   Tính tiền một hoá đơn
+   ============================================================
+
+   Một chỗ duy nhất tính giảm giá — app.js tính y hệt để hiện trước, nhưng
+   số ghi vào sổ luôn là số máy chủ tính ở đây.
+
+   $lines: [['svc' => dòng services, 'qty' => n, 'unit' => đơn giá, 'mdisc' => giảm tay]]
+   Giảm theo hạng và khuyến mãi KHÔNG cộng dồn — lấy mức lớn hơn. Cả hai
+   chỉ áp lên dòng được giảm (services.discountable). Món có giảm thêm
+   bằng tay (mdisc, tính trên cả dòng) thì bỏ qua hạng/KM — giảm đúng số
+   quầy gõ, không phụ thuộc hạng.
+
+   Giảm theo % thì làm tròn GIÁ SAU GIẢM của từng món theo bước chủ chọn
+   ($round = 5000 / 10000, $mode 'down' = xuống, có lợi cho khách; 'near'
+   = gần nhất): cắt 170k hạng Đồng −5% = 161.500 → 160.000. */
+function mhRoundCfg(): array {
+  $b = (int)mhSetting('disc_round', '5000');
+  return [in_array($b, [1000, 5000, 10000], true) ? $b : 1000, mhSetting('disc_round_mode', 'down') === 'near' ? 'near' : 'down'];
+}
+
+function mhQuote(array $lines, int $tierPct, string $tierName, ?array $promo, ?array $round = null): array {
+  [$buoc, $kieu] = $round ?? mhRoundCfg();
+  $gross = []; $elig = 0;
+  foreach ($lines as $i => $l) {
+    $gross[$i] = $l['unit'] * $l['qty'];
+    if ((int)$l['svc']['discountable']) $elig += $gross[$i];
+  }
+  $chia = function (int $tong, array $chon) use ($gross) {
+    /* Chia $tong theo tỉ lệ thành tiền các dòng $chon; dòng cuối nhận phần dư. */
+    $ra = []; $co = 0; $sum = 0;
+    foreach ($chon as $i) $sum += $gross[$i];
+    if ($sum <= 0 || $tong <= 0) return $ra;
+    $tong = min($tong, $sum);
+    $cuoi = end($chon);
+    foreach ($chon as $i) {
+      $d = $i === $cuoi ? $tong - $co : intdiv($tong * $gross[$i], $sum);
+      $ra[$i] = $d; $co += $d;
+    }
+    return $ra;
+  };
+  $eligIdx = array_keys(array_filter($lines, function ($l) {
+    return (int)$l['svc']['discountable'] === 1 && empty($l['mdisc']);
+  }));
+
+  $pct = function (int $p) use ($eligIdx, $lines, $buoc, $kieu) {
+    $ra = [];
+    foreach ($eligIdx as $i) {
+      $u = $lines[$i]['unit'];
+      $con = $u - (int)round($u * $p / 100000) * 1000;
+      $con = $kieu === 'near' ? (int)round($con / $buoc) * $buoc : intdiv($con, $buoc) * $buoc;
+      $ra[$i] = ($u - max(0, min($u, $con))) * $lines[$i]['qty'];
+    }
+    return $ra;
+  };
+  $tier = $tierPct > 0 ? $pct($tierPct) : [];
+  $pro  = [];
+  if ($promo) $pro = $promo['kind'] === 'pct' ? $pct((int)$promo['value']) : $chia((int)$promo['value'], $eligIdx);
+  $laKm = array_sum($pro) > array_sum($tier);
+  $dung = $laKm ? $pro : $tier;
+  $note = '';
+  if (array_sum($dung) > 0)
+    $note = $laKm ? 'KM: ' . $promo['name'] : 'Hạng ' . $tierName . ' −' . $tierPct . '%';
+
+  $disc = [];
+  foreach ($lines as $i => $l) $disc[$i] = min($gross[$i], $dung[$i] ?? 0);
+  $tay = [];
+  foreach ($lines as $i => $l) {
+    $tay[$i] = min($gross[$i], max(0, (int)($l['mdisc'] ?? 0)));
+    if ($tay[$i] > 0) $disc[$i] = $tay[$i];
+  }
+  $ra = ['lines' => [], 'subtotal' => 0, 'discount' => 0, 'total' => 0, 'note' => $note, 'mdisc' => array_sum($tay)];
+  foreach ($lines as $i => $l) {
+    $ra['lines'][] = ['net' => $gross[$i] - $disc[$i], 'disc' => $disc[$i], 'gross' => $gross[$i], 'mdisc' => $tay[$i]];
+    $ra['subtotal'] += $gross[$i];
+    $ra['discount'] += $disc[$i];
+  }
+  $ra['total'] = $ra['subtotal'] - $ra['discount'];
+  return $ra;
+}
+
+/* Khuyến mãi đang chạy hôm nay. */
+function mhPromos(bool $todayOnly): array {
+  $rows = db()->query('SELECT * FROM promos ORDER BY active DESC, sort, id')->fetchAll();
+  $nay = mhToday();
+  $ra = [];
+  foreach ($rows as $p) {
+    $p['id'] = (int)$p['id']; $p['value'] = (int)$p['value']; $p['active'] = (int)$p['active'];
+    $p['running'] = $p['active'] && ($p['start_date'] === '' || $p['start_date'] <= $nay)
+                    && ($p['end_date'] === '' || $p['end_date'] >= $nay);
+    if ($todayOnly && !$p['running']) continue;
+    $ra[] = $p;
+  }
+  return $ra;
+}
+
+function mhServices(bool $activeOnly): array {
+  $rows = db()->query('SELECT * FROM services' . ($activeOnly ? ' WHERE active = 1' : '') . ' ORDER BY sort, id')->fetchAll();
+  foreach ($rows as &$s) {
+    foreach (['id', 'price', 'active', 'sort', 'wage', 'discountable', 'duration', 'bookable'] as $k) $s[$k] = (int)$s[$k];
+    $s['grp'] = (string)$s['grp']; $s['note'] = (string)$s['note'];
+    $s['comm_pct'] = (float)$s['comm_pct'];
+  }
+  unset($s);
+  return $rows;
+}
+
+/* ============================================================
+   Lương thợ
+   ============================================================
+
+   Lương = lương cứng + Σ(tiền thợ mỗi lượt × số lượt) + Σ(% hoa hồng ×
+   tiền thực thu của dòng) + tip (nếu tip trả cuối tháng) + thưởng/trừ.
+   Thợ của cả hoá đơn nhận phần của mọi dòng trong hoá đơn đó.
+
+   Tip: mặc định trả thợ CUỐI NGÀY từ két (đúng như file chốt ca của quán)
+   — khi đó chốt ca trừ tip ra, lương tháng không cộng nữa. */
+function mhTipMonthly(): bool { return false; }     // quán trả tip trong ngày từ két — lương tháng không cộng
+
+/* KPI của tháng; chưa đặt thì lấy tháng gần nhất trước đó. */
+function mhKpi(string $month): array {
+  $ra = [];
+  $st = db()->prepare('SELECT k.* FROM payroll_kpi k WHERE k.month = (SELECT MAX(month) FROM payroll_kpi
+                         WHERE barber_id = k.barber_id AND month <= ?)');
+  $st->execute([$month]);
+  foreach ($st->fetchAll() as $k)
+    $ra[(int)$k['barber_id']] = ['cuts' => (int)$k['cuts'], 'combo' => (int)$k['combo'], 'chem' => (int)$k['chem'],
+                                 'prod' => (int)$k['prod'], 'from' => $k['month']];
+  return $ra;
+}
+
+function mhPayroll(string $month): array {
+  $svc = [];
+  foreach (mhServices(false) as $s) $svc[$s['id']] = $s;
+  $coTip = mhTipMonthly();
+  $kpi = mhKpi($month);
+
+  $tho = [];
+  foreach (mhBarbers() as $b)
+    $tho[$b['id']] = ['id' => $b['id'], 'name' => $b['name'], 'active' => $b['active'],
+                      'base' => (int)$b['base_salary'], 'bills' => 0, 'revenue' => 0, 'tip' => 0,
+                      'wage' => 0, 'sales' => 0, 'comm' => 0, 'adj' => 0, 'rows' => [], 'adjust' => [],
+                      /* Số cho KPI: đầu cắt (dịch vụ cắt không phải combo), số combo,
+                         doanh thu hoá chất, doanh thu sản phẩm — đúng 4 cột "Tổng" ở
+                         bảng lương tay của quán. */
+                      'kpi_now' => ['cuts' => 0, 'combo' => 0, 'chem' => 0, 'prod' => 0],
+                      'kpi' => $kpi[$b['id']] ?? null, 'groups' => []];
+
+  $st = db()->prepare("SELECT v.id, v.barber_id, v.amount, v.tip FROM visits v
+                        WHERE v.void_at IS NULL AND v.barber_id IS NOT NULL AND v.visit_date LIKE ?");
+  $st->execute([$month . '-%']);
+  $bills = $st->fetchAll();
+  foreach ($bills as $v) {
+    $b = (int)$v['barber_id'];
+    if (!isset($tho[$b])) continue;
+    $tho[$b]['bills']++;
+    $tho[$b]['revenue'] += (int)$v['amount'];
+    $tho[$b]['tip'] += (int)$v['tip'];
+  }
+  $st = db()->prepare("SELECT v.barber_id, i.service_id, i.name, SUM(i.qty) q, SUM(i.price) p FROM visit_items i
+                         JOIN visits v ON v.id = i.visit_id
+                        WHERE v.void_at IS NULL AND v.barber_id IS NOT NULL AND v.visit_date LIKE ?
+                        GROUP BY v.barber_id, COALESCE(i.service_id, -1), CASE WHEN i.service_id IS NULL THEN i.name END");
+  $st->execute([$month . '-%']);
+  foreach ($st->fetchAll() as $r) {
+    $b = (int)$r['barber_id'];
+    if (!isset($tho[$b])) continue;
+    $s = $r['service_id'] !== null ? ($svc[(int)$r['service_id']] ?? null) : null;
+    $q = (int)$r['q']; $p = (int)$r['p'];
+    $wage = $s ? $s['wage'] * $q : 0;
+    $comm = $s && $s['comm_pct'] > 0 ? (int)round($p * $s['comm_pct'] / 100) : 0;
+    $tho[$b]['rows'][] = ['name' => $s ? $s['name'] : $r['name'], 'qty' => $q, 'sales' => $p,
+                          'rate' => $s ? $s['wage'] : 0, 'wage' => $wage,
+                          'comm_pct' => $s ? $s['comm_pct'] : 0, 'comm' => $comm];
+    $tho[$b]['wage'] += $wage;
+    $tho[$b]['comm'] += $comm;
+    if ($s && $s['comm_pct'] > 0) $tho[$b]['sales'] += $p;
+    $g = $s ? $s['grp'] : '?';
+    $tho[$b]['groups'][$g]['qty'] = ($tho[$b]['groups'][$g]['qty'] ?? 0) + $q;
+    $tho[$b]['groups'][$g]['sales'] = ($tho[$b]['groups'][$g]['sales'] ?? 0) + $p;
+    $k = &$tho[$b]['kpi_now'];
+    if ($s && $s['grp'] === 'B') $k['combo'] += $q;
+    elseif ($s && $s['kind'] === 'cut') $k['cuts'] += $q;
+    if ($s && $s['grp'] === 'C') $k['chem'] += $p;
+    if ($s && ($s['grp'] === 'D' || $s['kind'] === 'product')) $k['prod'] += $p;
+    unset($k);
+  }
+  $st = db()->prepare('SELECT * FROM payroll_adjust WHERE month = ? ORDER BY id');
+  $st->execute([$month]);
+  foreach ($st->fetchAll() as $a) {
+    $b = (int)$a['barber_id'];
+    if (!isset($tho[$b])) continue;
+    $tho[$b]['adjust'][] = ['id' => (int)$a['id'], 'label' => $a['label'], 'amount' => (int)$a['amount'],
+                            'qty' => (int)$a['qty'], 'rate' => (int)$a['rate'], 'recurring' => (int)$a['recurring']];
+    $tho[$b]['adj'] += (int)$a['amount'];
+  }
+  $ra = [];
+  foreach ($tho as $t) {
+    if (!$t['active'] && !$t['bills'] && !$t['adjust']) continue;     // thợ đã nghỉ, tháng này không làm
+    usort($t['rows'], function ($a, $b) { return $b['qty'] <=> $a['qty']; });
+    $t['total'] = $t['base'] + $t['wage'] + $t['comm'] + ($coTip ? $t['tip'] : 0) + $t['adj'];
+    $ra[] = $t;
+  }
+  $st = db()->prepare('SELECT COUNT(*) FROM visits WHERE void_at IS NULL AND barber_id IS NULL AND visit_date LIKE ?');
+  $st->execute([$month . '-%']);
+  return ['month' => $month, 'rows' => $ra, 'tip_included' => $coTip, 'no_barber' => (int)$st->fetchColumn(),
+          'groups' => mhGroups()];
+}
+
+/* ============================================================
+   Chốt ca
+   ============================================================
+
+   Tiền phải có trong két = tiền đầu ca + tiền mặt thu từ hoá đơn
+   ± ngoài luồng − tip trả thợ từ két (nếu tip trả hằng ngày).
+   Giống hệt công thức file "Augustus - Chốt ca": đầu ca + doanh thu −
+   chuyển khoản − tip ± ngoài luồng. */
+function mhShiftCalc(string $date, int $opening): array {
+  $st = db()->prepare('SELECT COALESCE(SUM(pay_cash),0) c, COALESCE(SUM(pay_transfer),0) t, COALESCE(SUM(tip),0) tip,
+                              COALESCE(SUM(amount),0) a, COUNT(*) n
+                         FROM visits WHERE void_at IS NULL AND visit_date = ?');
+  $st->execute([$date]);
+  $v = $st->fetch();
+  $st = db()->prepare('SELECT COALESCE(SUM(amount),0) FROM cash_moves WHERE void_at IS NULL AND move_date = ?');
+  $st->execute([$date]);
+  $moves = (int)$st->fetchColumn();
+  $tipsOut = mhTipMonthly() ? 0 : (int)$v['tip'];
+  return ['opening' => $opening, 'cash_sales' => (int)$v['c'], 'transfer' => (int)$v['t'], 'revenue' => (int)$v['a'],
+          'tips' => (int)$v['tip'], 'tips_out' => $tipsOut, 'moves' => $moves, 'bills' => (int)$v['n'],
+          'expected' => $opening + (int)$v['c'] + $moves - $tipsOut];
+}
+
+
+/* ============================================================
+   Đặt lịch
+   ============================================================ */
+
+/* Cấu hình đặt lịch (settings): giờ mở / đóng cửa, bước giờ, khách được tự
+   đặt không, đặt trước tối đa mấy ngày, phải đặt trước ít nhất mấy phút,
+   những thứ trong tuần quán nghỉ (0 = CN), lời nhắn trên trang đặt lịch. */
+function mhBookCfg(): array {
+  $hm = function (string $s, int $mac) { return preg_match('/^(\d{1,2}):(\d{2})$/', $s, $m) ? (int)$m[1] * 60 + (int)$m[2] : $mac; };
+  $nghi = array_values(array_map('intval', array_filter(explode(',', mhSetting('book_closed_days', '')),
+                                                       function ($d) { return preg_match('/^[0-6]$/', trim($d)); })));
+  return ['open' => $hm(mhSetting('book_open', '09:00'), 540), 'close' => $hm(mhSetting('book_close', '20:00'), 1200),
+          'step' => in_array((int)mhSetting('book_step', '15'), [15, 30], true) ? (int)mhSetting('book_step', '15') : 15,
+          'online' => mhSetting('book_online', '1') === '1', 'days' => max(1, min(60, (int)mhSetting('book_days', '14'))),
+          'notice' => max(0, min(1440, (int)mhSetting('book_notice', '60'))), 'closed_days' => $nghi,
+          'msg' => mhSetting('book_msg', ''),
+          /* Khách bỏ hẹn từng này lần (180 ngày gần đây) thì không tự đặt online được nữa. */
+          'noshow_block' => max(1, (int)mhSetting('book_noshow_block', '2'))];
+}
+
+function mhNowMin(): int { return (int)date('G') * 60 + (int)date('i'); }
+
+/* Lịch bận của từng thợ trong ngày: lịch hẹn còn hiệu lực + giờ nghỉ.
+   [barber_id => [[từ, đến, booking_id|0], …]] */
+function mhBusy(string $date, int $boQua = 0): array {
+  $ra = [];
+  $st = db()->prepare("SELECT id, barber_id, start_min, dur FROM bookings
+                        WHERE book_date = ? AND status IN ('booked', 'arrived') AND barber_id IS NOT NULL AND id <> ?");
+  $st->execute([$date, $boQua]);
+  foreach ($st->fetchAll() as $b) $ra[(int)$b['barber_id']][] = [(int)$b['start_min'], (int)$b['start_min'] + (int)$b['dur'], (int)$b['id']];
+  $st = db()->prepare('SELECT barber_id, start_min, end_min FROM barber_off WHERE off_date = ?');
+  $st->execute([$date]);
+  foreach ($st->fetchAll() as $o) $ra[(int)$o['barber_id']][] = [(int)$o['start_min'], (int)$o['end_min'], 0];
+  return $ra;
+}
+
+function mhFreeAt(array $busy, int $bid, int $tu, int $den): bool {
+  foreach ($busy[$bid] ?? [] as [$a, $b]) if ($tu < $b && $a < $den) return false;
+  return true;
+}
+
+/* Giờ còn trống trong ngày cho một lần làm dài $dur phút: [[phút, [thợ trống…]], …].
+   $online: theo luật khách tự đặt (đặt trước tối thiểu, tối đa mấy ngày). */
+function mhSlots(string $date, int $dur, ?int $bid, bool $online, int $boQua = 0): array {
+  $cfg = mhBookCfg();
+  $nay = mhToday();
+  if ($date < $nay) return [];
+  if (in_array((int)date('w', strtotime($date)), $cfg['closed_days'], true)) return [];
+  if ($online && $date > date('Y-m-d', strtotime("+{$cfg['days']} days"))) return [];
+  $tho = array_column(mhBarbers(true), 'id');
+  if ($bid) $tho = in_array($bid, $tho, true) ? [$bid] : [];
+  if (!$tho) return [];
+  $busy = mhBusy($date, $boQua);
+  $tuGio = $cfg['open'];
+  if ($date === $nay) $tuGio = max($tuGio, mhNowMin() + ($online ? $cfg['notice'] : 0));
+  $ra = [];
+  $dur = max(15, $dur);
+  for ($t = $cfg['open']; $t + $dur <= $cfg['close']; $t += $cfg['step']) {
+    if ($t < $tuGio) continue;
+    $trong = array_values(array_filter($tho, function ($b) use ($busy, $t, $dur) { return mhFreeAt($busy, $b, $t, $t + $dur); }));
+    if ($trong) $ra[] = [$t, $trong];
+  }
+  return $ra;
+}
+
+/* Khách không kén thợ: chọn thợ trống, ít lịch trong ngày hơn thì ưu tiên. */
+function mhPickBarber(array $busy, array $trong): int {
+  usort($trong, function ($a, $b) use ($busy) { return count($busy[$a] ?? []) <=> count($busy[$b] ?? []); });
+  return $trong[0];
+}
+
+function mhBookRow(array $b, bool $hienSo): array {
+  return ['id' => (int)$b['id'], 'date' => $b['book_date'], 'start' => (int)$b['start_min'], 'dur' => (int)$b['dur'],
+          'barber_id' => $b['barber_id'] !== null ? (int)$b['barber_id'] : null, 'any' => (int)$b['any_barber'],
+          'customer_id' => $b['customer_id'] !== null ? (int)$b['customer_id'] : null,
+          'name' => $b['name'], 'phone' => $hienSo ? $b['phone'] : mhMask($b['phone']),
+          'services' => json_decode($b['services'], true) ?: [], 'note' => $b['note'], 'status' => $b['status'],
+          'confirmed' => (int)$b['confirmed'], 'source' => $b['source'],
+          'visit_id' => $b['visit_id'] !== null ? (int)$b['visit_id'] : null,
+          'cancel_note' => $b['cancel_note'], 'by' => $b['by_name'] ?? null, 'created_at' => (int)$b['created_at']];
+}
+
+/* Dịch vụ khách chọn → [[{id, name}], tổng phút]. Bỏ qua món không đặt được. */
+function mhBookServices($ids, bool $online): array {
+  $sv = [];
+  foreach (mhServices(true) as $s) $sv[$s['id']] = $s;
+  $ds = []; $dur = 0;
+  foreach (array_unique(array_map('intval', (array)$ids)) as $id) {
+    $s = $sv[$id] ?? null;
+    if (!$s || $s['kind'] === 'product' || ($online && !$s['bookable'])) continue;
+    $ds[] = ['id' => $s['id'], 'name' => $s['name']];
+    $dur += $s['duration'] ?: 30;
+  }
+  return [$ds, $dur];
+}
+
+/* ============================================================
+   Sao lưu
+   ============================================================
+
+   Mỗi đêm Cron Jobs của Hostinger chạy api/backup.php:
+     1. chép cơ sở dữ liệu ra một bản ổn định (VACUUM INTO — app vẫn chạy
+        bình thường trong lúc chép),
+     2. nén zip, khoá bằng mật khẩu MH_BACKUP_PASS (AES-256) — trong đó có
+        số điện thoại của cả tệp khách,
+     3. giữ 30 bản gần nhất trong memberhub-data/backups (ngoài thư mục web),
+     4. gửi vào Gmail qua SMTP bằng "Mật khẩu ứng dụng" của Google.        */
+
+const MH_BACKUP_KEEP = 30;
+
+function mhBackupDir(): string {
+  global $DB_FILE;
+  $d = dirname($DB_FILE) . '/backups';
+  if (!is_dir($d)) @mkdir($d, 0700, true);
+  if (!is_file($d . '/.htaccess')) @file_put_contents($d . '/.htaccess', "Require all denied\nOrder allow,deny\nDeny from all\n");
+  return $d;
+}
+
+function mhBackupFiles(): array {
+  $ra = [];
+  foreach (glob(mhBackupDir() . '/memberhub-*.{zip,gz}', GLOB_BRACE) ?: [] as $f)
+    $ra[] = ['name' => basename($f), 'size' => filesize($f), 'at' => filemtime($f)];
+  usort($ra, function ($a, $b) { return strcmp($b['name'], $a['name']); });
+  return $ra;
+}
+
+function mhBackupMake(): array {
+  $dir = mhBackupDir();
+  $ts = date('Y-m-d_His');
+  $tho = "$dir/memberhub-$ts.sqlite";
+  @unlink($tho);
+  db()->exec('VACUUM INTO ' . db()->quote($tho));
+  $pass = defined('MH_BACKUP_PASS') ? (string)MH_BACKUP_PASS : '';
+  if (class_exists('ZipArchive')) {
+    $f = "$dir/memberhub-$ts.zip";
+    $z = new ZipArchive();
+    if ($z->open($f, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) throw new RuntimeException('Không tạo được tệp zip.');
+    $z->addFile($tho, "memberhub-$ts.sqlite");
+    if ($pass !== '') {
+      $z->setPassword($pass);
+      if (!$z->setEncryptionName("memberhub-$ts.sqlite", ZipArchive::EM_AES_256)) throw new RuntimeException('Máy chủ không khoá được tệp zip.');
+    }
+    $z->close();
+  } else {
+    if ($pass !== '') throw new RuntimeException('Máy chủ thiếu ZipArchive — không khoá được tệp sao lưu.');
+    $f = "$dir/memberhub-$ts.sqlite.gz";
+    file_put_contents($f, gzencode((string)file_get_contents($tho), 9));
+  }
+  @unlink($tho);
+  $ds = mhBackupFiles();
+  foreach (array_slice($ds, MH_BACKUP_KEEP) as $cu) @unlink($dir . '/' . $cu['name']);
+  return ['path' => $f, 'name' => basename($f), 'size' => filesize($f), 'locked' => $pass !== ''];
+}
+
+function mhBackupMailReady(): bool {
+  return defined('MH_BACKUP_TO') && MH_BACKUP_TO !== '' && defined('MH_SMTP_USER') && MH_SMTP_USER !== ''
+      && defined('MH_SMTP_PASS') && MH_SMTP_PASS !== '';
+}
+
+/* Sao lưu + gửi mail. Ghi kết quả vào settings.last_backup để màn Thiết
+   lập và Tổng quan báo cho chủ biết đêm qua có chạy không. */
+function mhBackupRun(bool $mail): array {
+  $kq = ['at' => time(), 'ok' => false, 'name' => '', 'size' => 0, 'mailed' => false, 'error' => ''];
+  try {
+    $b = mhBackupMake();
+    $kq = array_merge($kq, ['ok' => true, 'name' => $b['name'], 'size' => $b['size'], 'locked' => $b['locked']]);
+    if ($mail && mhBackupMailReady()) {
+      if (!$b['locked']) throw new RuntimeException('Chưa đặt MH_BACKUP_PASS — không gửi tệp chưa khoá ra ngoài.');
+      if ($b['size'] > 20 * 1024 * 1024) throw new RuntimeException('Tệp sao lưu lớn quá 20MB, Gmail không nhận.');
+      $shop = defined('MH_SHOP_NAME') ? MH_SHOP_NAME : 'Hội viên';
+      mhSmtpSend((string)MH_BACKUP_TO, "[$shop] Sao lưu dữ liệu " . date('d/m/Y'),
+        "Bản sao lưu tự động của app $shop lúc " . date('H:i d/m/Y') . ".\n\n"
+        . "Tệp: {$b['name']} (" . number_format($b['size'] / 1024, 0, ',', '.') . " KB), khoá bằng mật khẩu sao lưu.\n"
+        . "Giữ thư này — khi cần khôi phục, gửi tệp cho người cài app.\n", $b['path']);
+      $kq['mailed'] = true;
+    }
+  } catch (Throwable $e) {
+    $kq['error'] = $e->getMessage();
+  }
+  db()->prepare("INSERT INTO settings (key, value) VALUES ('last_backup', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      ->execute([json_encode($kq, JSON_UNESCAPED_UNICODE)]);
+  return $kq;
+}
+
+/* Gửi mail qua SMTP (Gmail: smtp.gmail.com cổng 465, đăng nhập bằng Mật
+   khẩu ứng dụng 16 chữ). Viết tay cho khỏi kéo thư viện về hosting. */
+function mhSmtpSend(string $to, string $subject, string $text, ?string $file = null): void {
+  $host = defined('MH_SMTP_HOST') ? MH_SMTP_HOST : 'smtp.gmail.com';
+  $port = defined('MH_SMTP_PORT') ? (int)MH_SMTP_PORT : 465;
+  $user = (string)MH_SMTP_USER;
+  $pass = str_replace(' ', '', (string)MH_SMTP_PASS);
+  $nhan = array_values(array_filter(array_map('trim', explode(',', $to))));
+  if (!$nhan) throw new RuntimeException('Chưa có địa chỉ nhận.');
+
+  /* ssl = cổng 465 (Gmail), tls = STARTTLS cổng 587, none = chỉ để thử trên máy. */
+  $kieu = defined('MH_SMTP_SECURE') ? MH_SMTP_SECURE : ($port === 465 ? 'ssl' : 'tls');
+  $fp = @stream_socket_client(($kieu === 'ssl' ? 'ssl://' : 'tcp://') . "$host:$port", $eno, $estr, 20);
+  if (!$fp) throw new RuntimeException("Không nối được tới $host:$port ($estr).");
+  stream_set_timeout($fp, 30);
+  $doc = function () use ($fp) {
+    $s = '';
+    while (($l = fgets($fp, 1024)) !== false) { $s .= $l; if (strlen($l) < 4 || $l[3] === ' ') break; }
+    return $s;
+  };
+  $lenh = function (?string $c, array $mong) use ($fp, $doc) {
+    if ($c !== null) fwrite($fp, $c . "\r\n");
+    $r = $doc();
+    if (!in_array((int)substr($r, 0, 3), $mong, true))
+      throw new RuntimeException('Máy chủ thư trả lời: ' . trim(preg_replace('/\s+/', ' ', $r)));
+    return $r;
+  };
+  try {
+    $lenh(null, [220]);
+    $lenh('EHLO memberhub', [250]);
+    if ($kieu === 'tls') {
+      $lenh('STARTTLS', [220]);
+      if (!stream_socket_enable_crypto($fp, true, STREAM_CRYPTO_METHOD_TLS_CLIENT)) throw new RuntimeException('Không bật được TLS.');
+      $lenh('EHLO memberhub', [250]);
+    }
+    $lenh('AUTH LOGIN', [334]);
+    $lenh(base64_encode($user), [334]);
+    try { $lenh(base64_encode($pass), [235]); }
+    catch (RuntimeException $e) {
+      throw new RuntimeException('Gmail không nhận mật khẩu — phải dùng "Mật khẩu ứng dụng" 16 chữ, không phải mật khẩu Gmail. ' . $e->getMessage());
+    }
+    $lenh("MAIL FROM:<$user>", [250]);
+    foreach ($nhan as $n) $lenh("RCPT TO:<$n>", [250, 251]);
+    $lenh('DATA', [354]);
+    $ranh = 'mh' . bin2hex(random_bytes(8));
+    $h = 'From: ' . '=?UTF-8?B?' . base64_encode(defined('MH_SHOP_NAME') ? MH_SHOP_NAME : 'Hoi vien') . "?= <$user>\r\n"
+       . 'To: ' . implode(', ', $nhan) . "\r\n"
+       . 'Subject: =?UTF-8?B?' . base64_encode($subject) . "?=\r\n"
+       . 'Date: ' . date('r') . "\r\n"
+       . 'Message-ID: <' . bin2hex(random_bytes(12)) . '@memberhub>' . "\r\n"
+       . "MIME-Version: 1.0\r\n"
+       . "Content-Type: multipart/mixed; boundary=\"$ranh\"\r\n\r\n"
+       . "--$ranh\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+       . chunk_split(base64_encode($text)) . "\r\n";
+    if ($file !== null) {
+      $ten = basename($file);
+      $h .= "--$ranh\r\nContent-Type: application/octet-stream; name=\"$ten\"\r\nContent-Transfer-Encoding: base64\r\n"
+          . "Content-Disposition: attachment; filename=\"$ten\"\r\n\r\n"
+          . chunk_split(base64_encode((string)file_get_contents($file)));
+    }
+    $h .= "--$ranh--\r\n";
+    /* base64 không bao giờ có dòng bắt đầu bằng dấu chấm — khỏi phải độn. */
+    fwrite($fp, $h . "\r\n.\r\n");
+    $lenh(null, [250]);
+    @fwrite($fp, "QUIT\r\n");
+  } finally {
+    fclose($fp);
+  }
 }

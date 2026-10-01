@@ -26,3 +26,12 @@ define('MH_UNDO_MINUTES', 15);
 
 /* Chỉ định hẳn chỗ cất cơ sở dữ liệu (không bắt buộc). */
 // define('MH_DB_FILE', '/home/uXXXXXXXX/domains/tenmien.com/memberhub-data/memberhub.sqlite');
+
+/* Sao lưu hằng đêm gửi vào Gmail (api/backup.php, chạy bằng Cron Jobs).
+   MH_SMTP_PASS là "Mật khẩu ứng dụng" 16 chữ của Google (Tài khoản Google
+   → Bảo mật → Xác minh 2 bước → Mật khẩu ứng dụng), KHÔNG phải mật khẩu Gmail. */
+// define('MH_BACKUP_TO',   'ban@gmail.com');          // nơi nhận, nhiều địa chỉ cách nhau dấu phẩy
+// define('MH_SMTP_USER',   'ban@gmail.com');          // Gmail dùng để gửi
+// define('MH_SMTP_PASS',   'xxxx xxxx xxxx xxxx');    // mật khẩu ứng dụng
+// define('MH_BACKUP_PASS', 'dat-mat-khau-mo-tep');    // mật khẩu mở tệp zip sao lưu — ghi lại cẩn thận
+// define('MH_BACKUP_KEY',  'chuoi-ngau-nhien-dai');   // chỉ cần khi cron gọi qua đường link
