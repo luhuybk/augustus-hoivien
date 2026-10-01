@@ -113,6 +113,8 @@ CREATE TABLE IF NOT EXISTS services (
   wage      INTEGER NOT NULL DEFAULT 0,
   comm_pct  REAL    NOT NULL DEFAULT 0,
   discountable INTEGER NOT NULL DEFAULT 1,
+  grp       TEXT    NOT NULL DEFAULT 'A',    -- nhóm: A lẻ · B combo · C hoá chất · D sản phẩm (settings.svc_groups)
+  note      TEXT    NOT NULL DEFAULT '',     -- chú thích cho nhân viên, hiện khi rê chuột
   active    INTEGER NOT NULL DEFAULT 1,
   sort      INTEGER NOT NULL DEFAULT 0
 );
@@ -253,22 +255,72 @@ CREATE TABLE IF NOT EXISTS promos (
 
 /* ---------------- lương ---------------- */
 
-/* Thưởng / phạt / ứng lương trong tháng — số âm là trừ. */
+/* Thưởng / phụ cấp / nợ / ứng lương trong tháng — số âm là trừ.
+   amount = qty × rate (có dấu). recurring = khoản tháng nào cũng có (tiền
+   xăng, bảo hiểm…) — tháng sau bấm một nút là chép sang. */
 CREATE TABLE IF NOT EXISTS payroll_adjust (
   id          INTEGER PRIMARY KEY,
   month       TEXT    NOT NULL,              -- 'YYYY-MM'
   barber_id   INTEGER NOT NULL REFERENCES barbers(id) ON DELETE CASCADE,
   label       TEXT    NOT NULL,
   amount      INTEGER NOT NULL,
+  qty         INTEGER NOT NULL DEFAULT 1,
+  rate        INTEGER NOT NULL DEFAULT 0,
+  recurring   INTEGER NOT NULL DEFAULT 0,
   created_at  INTEGER NOT NULL,
   created_by  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_padj_month ON payroll_adjust(month);
 
+/* KPI tháng của từng thợ. Tháng chưa đặt thì dùng KPI tháng gần nhất. */
+CREATE TABLE IF NOT EXISTS payroll_kpi (
+  month       TEXT    NOT NULL,
+  barber_id   INTEGER NOT NULL REFERENCES barbers(id) ON DELETE CASCADE,
+  cuts        INTEGER NOT NULL DEFAULT 0,    -- số đầu cắt
+  combo       INTEGER NOT NULL DEFAULT 0,    -- số combo
+  chem        INTEGER NOT NULL DEFAULT 0,    -- doanh thu hoá chất
+  prod        INTEGER NOT NULL DEFAULT 0,    -- doanh thu sản phẩm
+  PRIMARY KEY (month, barber_id)
+);
+
 /* Tháng đã chốt lương: chụp lại nguyên bảng lương lúc chốt (JSON). */
 CREATE TABLE IF NOT EXISTS payroll_closed (
   month       TEXT    PRIMARY KEY,
   data        TEXT    NOT NULL,
+  closed_at   INTEGER NOT NULL,
+  closed_by   INTEGER
+);
+
+/* ---------------- chốt ca ---------------- */
+
+/* Tiền "ngoài luồng" trong két: mua đá −8.000, thu hộ +…  */
+CREATE TABLE IF NOT EXISTS cash_moves (
+  id          INTEGER PRIMARY KEY,
+  move_date   TEXT    NOT NULL,
+  amount      INTEGER NOT NULL,              -- + thu vào, − chi ra
+  note        TEXT    NOT NULL,
+  created_at  INTEGER NOT NULL,
+  created_by  INTEGER,
+  void_at     INTEGER,
+  void_by     INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_cash_date ON cash_moves(move_date);
+
+/* Mỗi ngày một lần chốt (chốt lại thì ghi đè). Các con số tính từ hoá đơn
+   do máy chủ tính lúc chốt và chụp lại — huỷ hoá đơn sau đó không làm
+   đổi biên bản; quầy chỉ nhập tiền đầu ca, tiền đếm được, tiền để lại. */
+CREATE TABLE IF NOT EXISTS shift_close (
+  close_date  TEXT    PRIMARY KEY,
+  opening     INTEGER NOT NULL DEFAULT 0,    -- tiền trong tủ đầu ca
+  cash_sales  INTEGER NOT NULL DEFAULT 0,    -- tiền mặt thu từ hoá đơn (gồm tip trả tiền mặt)
+  transfer    INTEGER NOT NULL DEFAULT 0,
+  tips_out    INTEGER NOT NULL DEFAULT 0,    -- tip trả thợ từ két
+  moves       INTEGER NOT NULL DEFAULT 0,    -- ngoài luồng (+/−)
+  expected    INTEGER NOT NULL DEFAULT 0,
+  counted     INTEGER NOT NULL DEFAULT 0,
+  diff        INTEGER NOT NULL DEFAULT 0,    -- counted − expected
+  keep        INTEGER NOT NULL DEFAULT 0,    -- để lại tủ cho ca sau
+  note        TEXT    NOT NULL DEFAULT '',
   closed_at   INTEGER NOT NULL,
   closed_by   INTEGER
 );

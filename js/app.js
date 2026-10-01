@@ -173,7 +173,9 @@ const App = {
         /* Danh sách thợ để sửa thợ ngay trên dòng lượt vừa ghi nhầm. */
         if (!this.barbers) this.barbers = (await API.call('barbers')).rows.filter(b => b.active);
         this.data.day = await API.call('day', s.date ? {date: s.date} : {});
+        if (!this.shiftUi || this.shiftUi.date !== this.data.day.date) this.shiftUi = {date: this.data.day.date};
         view.innerHTML = Views.day(this.data.day);
+        this.shiftLive();
         break;
       case 'more': {
         let ts = null;
@@ -205,7 +207,8 @@ const App = {
       case 'services': {
         const r = await API.call('services');
         this.data.svcEdit = r.rows.map(x => Object.assign({}, x));
-        view.innerHTML = Views.services(this.data.svcEdit);
+        this.data.svcGroups = r.groups.map(x => Object.assign({}, x));
+        this.drawSvc();
         break;
       }
       case 'import':    view.innerHTML = Views.importView(this.data.imp || (this.data.imp = {})); break;
@@ -219,6 +222,28 @@ const App = {
       case 'password':  view.innerHTML = Views.password(); break;
       default:          this.stack = [{name: 'lookup'}]; return this._render();
     }
+  },
+
+  drawSvc(){
+    const y = window.scrollY;
+    $('#view').innerHTML = Views.services(this.data.svcEdit, this.data.svcGroups);
+    window.scrollTo(0, y);
+  },
+
+  /* Chốt ca: gõ tiền đầu ca / tiền đếm được → cập nhật "phải có" và
+     chênh lệch ngay, không vẽ lại (bàn phím điện thoại khỏi sập). */
+  shiftLive(){
+    const d = this.data.day, ui = this.shiftUi;
+    if (!d || !$('#shExp')) return;
+    const n = v => Number(String(v == null ? '' : v).replace(/\D/g, '')) || 0;
+    const mo = ui.opening != null ? n(ui.opening) : d.shift.opening;
+    const exp = mo + d.shift.cash_sales + d.shift.moves - d.shift.tips_out;
+    $('#shExp').textContent = tien(exp);
+    const box = $('#shDiff');
+    if (ui.counted == null || ui.counted === ''){ box.className = 'diffbox'; box.textContent = 'Đếm tiền trong tủ rồi nhập vào ô trên.'; return; }
+    const lech = n(ui.counted) - exp;
+    box.className = 'diffbox ' + (lech === 0 ? 'ok' : 'bad');
+    box.textContent = lech === 0 ? 'Chuẩn ✓ — khớp từng đồng' : (lech > 0 ? 'Dư ' : 'Thiếu ') + tien(Math.abs(lech)) + ' — kiểm lại, hoặc ghi lý do';
   },
 
   /* Vẽ lại thẻ khách tại chỗ mà không nhảy trang. */
@@ -614,6 +639,34 @@ const App = {
           return;
         }
         case 'payPrint': return this.printPayroll();
+        case 'payCopy': {
+          el.disabled = true;
+          const r = await API.call('payroll_adjust_copy', {month: this.data.payroll.month, barber_id: id});
+          this.data.payroll = r;
+          toast(r.copied ? 'Đã chép ' + r.copied + ' khoản' : 'Các khoản hằng tháng đã có đủ', 'ok');
+          $('#view').innerHTML = Views.payroll(this.data.payroll, this.pay);
+          return;
+        }
+
+        /* ----- chốt ca ----- */
+        case 'shiftEdit':   this.shiftUi = {date: this.data.day.date, edit: true}; return this.render();
+        case 'shiftCancel': this.shiftUi = {date: this.data.day.date}; return this.render();
+        case 'shiftClose': {
+          const ui = this.shiftUi, n = v => Number(String(v == null ? '' : v).replace(/\D/g, '')) || 0;
+          if (ui.counted == null || ui.counted === '') return toast('Đếm tiền trong tủ rồi nhập vào ô "Tiền đếm được".', 'bad');
+          el.disabled = true;
+          const r = await API.call('shift_close', {date: this.data.day.date,
+            opening: ui.opening != null ? n(ui.opening) : this.data.day.shift.opening,
+            counted: n(ui.counted), keep: n(ui.keep), note: ui.note || ''});
+          toast(r.diff === 0 ? 'Đã chốt ca — chuẩn ✓' : 'Đã chốt ca, lệch ' + tien(r.diff), r.diff === 0 ? 'ok' : '');
+          this.shiftUi = {date: this.data.day.date};
+          return this.render();
+        }
+        case 'moveDel': {
+          if (!this.hoiLai(el, 'Bỏ?')) return;
+          await API.call('cash_move_del', {id});
+          return this.render();
+        }
         case 'promoDel': {
           if (!this.hoiLai(el, 'Xoá?')) return;
           $('#view').innerHTML = Views.promos((await API.call('promo_del', {id})).rows);
@@ -759,17 +812,35 @@ const App = {
         }
 
         /* dịch vụ */
-        case 'svcAdd':
-          this.data.svcEdit.push({id: 0, name: '', kind: 'cut', price: 0, kv_codes: '', active: 1, wage: 0, comm_pct: 0, discountable: 1});
-          return $('#view').innerHTML = Views.services(this.data.svcEdit);
+        case 'svcAdd': case 'svcAddIn': {
+          const g = el.dataset.g || (this.data.svcGroups[0] || {}).code || 'A';
+          this.data.svcEdit.push({id: 0, name: '', kind: g === 'D' ? 'product' : g === 'C' ? 'perm' : 'cut', price: 0, kv_codes: '',
+                                  active: 1, wage: 0, comm_pct: 0, discountable: g === 'D' ? 0 : 1, grp: g, note: ''});
+          return this.drawSvc();
+        }
         case 'svcUp': {
+          /* Đổi chỗ với dịch vụ đứng trước trong CÙNG nhóm. */
           const i = Number(el.dataset.i), a = this.data.svcEdit;
-          [a[i - 1], a[i]] = [a[i], a[i - 1]];
-          return $('#view').innerHTML = Views.services(a);
+          let j = i - 1;
+          while (j >= 0 && a[j].grp !== a[i].grp) j--;
+          if (j >= 0) [a[j], a[i]] = [a[i], a[j]];
+          return this.drawSvc();
+        }
+        case 'grpAdd': {
+          const g = this.data.svcGroups, dung = new Set(g.map(x => x.code));
+          let c = 'A'; while (dung.has(c)) c = String.fromCharCode(c.charCodeAt(0) + 1);
+          g.push({code: c, name: 'Nhóm mới'});
+          return this.drawSvc();
+        }
+        case 'grpDel': {
+          const g = this.data.svcGroups, k = Number(el.dataset.i);
+          if (this.data.svcEdit.some(x => x.grp === g[k].code)) return toast('Nhóm còn dịch vụ — chuyển dịch vụ sang nhóm khác trước.', 'bad');
+          g.splice(k, 1);
+          return this.drawSvc();
         }
         case 'saveSvc': {
           el.disabled = true;
-          await API.call('services_save', {rows: this.data.svcEdit});
+          await API.call('services_save', {rows: this.data.svcEdit, groups: this.data.svcGroups});
           this.services = null;
           toast('Đã lưu dịch vụ — lượt cũ đã được xếp loại lại', 'ok');
           return this.back();
@@ -923,6 +994,15 @@ const App = {
       else if (so.length === 4 || so.length >= 10 || !so) this.posSearch();
       return;
     }
+    if (/^sh(Open|Count|Keep|Note)$/.test(t.id)){
+      if (t.dataset.money !== undefined) this.dinhDangTien(t);
+      this.shiftUi[{shOpen: 'opening', shCount: 'counted', shKeep: 'keep', shNote: 'note'}[t.id]] = t.value;
+      return this.shiftLive();
+    }
+    if (t.closest && t.closest('#moveForm, #payAdjForm, #kpiForm')){
+      if (t.dataset.money !== undefined) this.dinhDangTien(t);
+      return;
+    }
     if (this.pos && t.closest && t.closest('.poswrap')){
       if (t.dataset.money !== undefined) this.dinhDangTien(t);
       if (t.dataset.pprice !== undefined){
@@ -971,6 +1051,11 @@ const App = {
       }
     } else if (t.dataset.bb){
       this.data.barberEdit[Number(t.dataset.bb)][t.dataset.f] = t.dataset.f === 'base_salary' ? Number(String(val).replace(/\D/g, '')) || 0 : val;
+    } else if (t.dataset.grp){
+      const g = this.data.svcGroups[Number(t.dataset.grp)], cu = g.code;
+      g[t.dataset.f] = t.dataset.f === 'code' ? t.value.trim().toUpperCase() : t.value;
+      /* Đổi mã nhóm thì dịch vụ trong nhóm đi theo. */
+      if (t.dataset.f === 'code') this.data.svcEdit.forEach(x => { if (x.grp === cu) x.grp = g.code; });
     } else if (t.dataset.svc){
       const row = this.data.svcEdit[Number(t.dataset.svc)];
       row[t.dataset.f] = t.dataset.f === 'price' || t.dataset.f === 'wage' ? Number(String(val).replace(/\D/g, '')) || 0
@@ -1035,12 +1120,25 @@ const App = {
         return await this.posPick(id);
       }
       if (f.id === 'payAdjForm'){
-        const so = Number(String(v.amount).replace(/\D/g, '')) * Number(v.sign);
         this.data.payroll = await API.call('payroll_adjust_add', {month: this.data.payroll.month,
-                                           barber_id: Number(f.dataset.barber), label: v.label, amount: so});
+                                           barber_id: Number(f.dataset.barber), label: v.label, sign: Number(v.sign),
+                                           qty: Number(v.qty) || 1, rate: Number(String(v.rate).replace(/\D/g, '')),
+                                           recurring: v.recurring ? 1 : 0});
         toast('Đã thêm', 'ok');
         $('#view').innerHTML = Views.payroll(this.data.payroll, this.pay);
         return;
+      }
+      if (f.id === 'kpiForm'){
+        const n = k => Number(String(v[k] || '').replace(/\D/g, '')) || 0;
+        await API.call('payroll_kpi_save', {month: this.data.payroll.month, barber_id: Number(f.dataset.barber),
+                                            cuts: n('cuts'), combo: n('combo'), chem: n('chem'), prod: n('prod')});
+        toast('Đã lưu KPI', 'ok');
+        return this.render();
+      }
+      if (f.id === 'moveForm'){
+        await API.call('cash_move_add', {date: this.data.day.date, note: v.note,
+                                         amount: Number(v.sign) * (Number(String(v.amount).replace(/\D/g, '')) || 0)});
+        return this.render();
       }
       if (f.dataset.promo !== undefined){
         const r = await API.call('promo_save', Object.assign({}, v, {id: Number(f.dataset.promo),

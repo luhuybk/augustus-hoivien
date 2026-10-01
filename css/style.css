@@ -322,11 +322,51 @@ button.tcard:hover{background:var(--bg3)}
 .kett .row{padding:3px 0}
 .kett b{font-size:16px}
 .tbl tbody tr.on{background:rgba(214,165,74,.12)}
-.adjform{display:grid;grid-template-columns:1fr 110px 140px auto;gap:8px}
-@media (max-width:600px){ .adjform{grid-template-columns:1fr 1fr} }
+.adjform{display:grid;grid-template-columns:minmax(160px,1fr) 150px 70px 140px auto auto;gap:8px;align-items:center}
+@media (max-width:760px){ .adjform{grid-template-columns:1fr 1fr} }
 @media (min-width:900px){
   .poswrap{max-width:1180px}
   .posgrid{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:14px;align-items:start}
   .posright{position:sticky;top:16px}
 }
 @media (max-width:420px){ .tabs button{font-size:10px;padding:9px 2px} }
+
+/* ---------------- nhóm dịch vụ & chú thích ---------------- */
+.grphead{display:flex;align-items:center;gap:8px;margin:12px 0 8px;font-size:13px;color:var(--tx2);font-weight:600}
+.grphead:first-of-type{margin-top:0}
+.grphead b{display:inline-grid;place-items:center;min-width:24px;height:24px;padding:0 6px;border-radius:7px;
+  background:var(--acc);color:var(--acc-tx);font-size:13px}
+.svc{position:relative}
+.svc .ti{display:inline-grid;place-items:center;width:15px;height:15px;border-radius:99px;margin-left:3px;vertical-align:1px;
+  font:italic 700 10px/1 Georgia,serif;background:var(--bg4);color:var(--tx2)}
+/* Chú thích chỉ hiện khi rê chuột (máy tính) — không che lưới trên máy cảm ứng. */
+@media (hover:hover){
+  .svc[data-tip]:hover::after{content:attr(data-tip);position:absolute;left:0;right:0;top:calc(100% + 6px);z-index:30;
+    padding:9px 11px;border-radius:10px;background:var(--bg4);border:1px solid var(--line);box-shadow:var(--shadow);
+    color:var(--tx);font-size:12.5px;font-weight:400;line-height:1.45;white-space:pre-line;pointer-events:none;min-width:200px}
+}
+
+/* ---------------- KPI ---------------- */
+.kdot{display:inline-block;width:10px;height:10px;border-radius:99px;background:var(--bg4);margin-right:4px;
+  box-shadow:inset 0 0 0 1px var(--line)}
+.kdot.hit{background:var(--ok)}
+.kpigrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;align-items:end}
+.kpi{background:var(--bg3);border-radius:10px;padding:10px 12px}
+.kpi.hit{box-shadow:inset 0 0 0 1.5px var(--ok)}
+.kpi .num{display:flex;align-items:center;gap:6px;margin:2px 0}
+.kpi .num b{font-size:17px}
+.kpi .inp.mini{width:100px;padding:5px 7px}
+
+/* ---------------- chốt ca ---------------- */
+.shift .row{padding:5px 0}
+.shift .op{width:16px;flex:none;color:var(--tx3);font-weight:700;text-align:center}
+.shift .eq{border-top:1px dashed var(--line);margin-top:4px;padding-top:8px}
+.shift .eq b{font-size:18px;color:var(--acc)}
+.shift.ok{border-color:var(--ok)}
+.shift.lech{border-color:var(--bad)}
+.diffbox{margin:8px 0;padding:10px 12px;border-radius:10px;background:var(--bg3);font-weight:600;font-size:14px;color:var(--tx2)}
+.diffbox.ok{background:rgba(79,211,154,.14);color:var(--ok)}
+.diffbox.bad{background:rgba(255,107,107,.14);color:var(--bad)}
+.moves .row{border-bottom:1px solid var(--line)}
+.moveform{display:grid;grid-template-columns:1fr 110px 130px auto;gap:8px;margin-top:8px}
+@media (max-width:600px){ .moveform{grid-template-columns:1fr 1fr} }

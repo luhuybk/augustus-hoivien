@@ -150,6 +150,11 @@ function mhMigrate(PDO $pdo): void {
           ->execute([$cu, $cu]);
   }
   mhVisitsNullableCustomer($pdo, $sql);
+  mhAddColumn($pdo, 'services', 'note', "TEXT NOT NULL DEFAULT ''");
+  mhAddColumn($pdo, 'payroll_adjust', 'qty', 'INTEGER NOT NULL DEFAULT 1');
+  mhAddColumn($pdo, 'payroll_adjust', 'rate', 'INTEGER NOT NULL DEFAULT 0');
+  mhAddColumn($pdo, 'payroll_adjust', 'recurring', 'INTEGER NOT NULL DEFAULT 0');
+  if (mhAddColumn($pdo, 'services', 'grp', "TEXT NOT NULL DEFAULT 'A'")) mhSeedGroups($pdo);
 
   if ((int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn() > 0) {
     mhSyncOwnerFromConfig($pdo);
@@ -186,6 +191,7 @@ function mhMigrate(PDO $pdo): void {
     ['Lấy ráy tai',              'care',     90000, 'SP000095,SP000101'],
     ['Sản phẩm',                 'product',      0, 'SP000084,SP000085,SP000089'],
   ] as $s) $sv->execute([$s[0], $s[1], $s[2], $s[3], ++$i, $s[1]]);
+  mhSeedGroups($pdo);
 
   $t = $pdo->prepare("INSERT INTO tiers (name, color, min_cuts, min_spend, perks, sort, disc_pct, bday_gift)
                       VALUES (?,?,?,?,?,?,?, CASE WHEN ? IN ('Vàng','Đen') THEN 'Quà sinh nhật' ELSE '' END)");
@@ -235,6 +241,62 @@ function mhSyncOwnerFromConfig(PDO $pdo): void {
   $pdo->prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('owner_pass_config', ?)")->execute([$dau]);
   $pdo->prepare('INSERT INTO audit_log (user_id, action, detail, ip, created_at) VALUES (?,?,?,?,?)')
       ->execute([$id, 'owner_reset', 'Mật khẩu chủ đặt lại từ config.php', (string)($_SERVER['REMOTE_ADDR'] ?? ''), time()]);
+}
+
+/* Xếp dịch vụ vào nhóm, và — nếu chủ chưa đặt tiền công nào — đặt sẵn
+   theo bảng lương quán đang tính tay (tháng 8/2026): đầu cắt 50k, Combo
+   Shine 90k, Combo Chill 85k, Chill & Shine 125k, ráy tai 35k, em bé 30k,
+   uốn 15% doanh thu; sản phẩm tách A 12% · B 20% · C 25% · S 50% theo đúng
+   mã hàng KiotViet. Chỉ chạy một lần, lúc thêm cột nhóm. */
+function mhSeedGroups(PDO $pdo): void {
+  $rows = $pdo->query('SELECT * FROM services ORDER BY sort, id')->fetchAll();
+  $up = $pdo->prepare('UPDATE services SET grp = ? WHERE id = ?');
+  foreach ($rows as $r) {
+    $f = mhFold((string)$r['name']);
+    $g = $r['kind'] === 'product' ? 'D'
+       : (in_array($r['kind'], ['perm', 'color'], true) || preg_match('/phuc hoi|tay toc|ep side|uon|nhuom/', $f) ? 'C'
+       : (str_contains($f, 'combo') ? 'B' : 'A'));
+    $up->execute([$g, $r['id']]);
+  }
+  if ((int)$pdo->query('SELECT COUNT(*) FROM services WHERE wage > 0 OR comm_pct > 0')->fetchColumn() > 0) return;
+  $set = $pdo->prepare('UPDATE services SET wage = ?, comm_pct = ? WHERE id = ?');
+  foreach ($rows as $r) {
+    $f = mhFold((string)$r['name']);
+    $w = 0; $c = 0;
+    if (str_contains($f, 'chill & shine') || str_contains($f, 'chill and shine')) $w = 125000;
+    elseif (str_contains($f, 'combo shine')) $w = 90000;
+    elseif (str_contains($f, 'combo chill')) $w = 85000;
+    elseif (str_contains($f, 'baby') || str_contains($f, 'em be')) $w = 30000;
+    elseif (str_contains($f, 'ray tai')) $w = 35000;
+    elseif ($r['kind'] === 'cut') $w = 50000;
+    elseif (str_contains($f, 'uon') || str_contains($f, 'curl')) $c = 15;
+    if ($w || $c) $set->execute([$w, $c, $r['id']]);
+  }
+  /* "Sản phẩm" chung một dòng (mã KiotViet A, B, C gộp lại) → mỗi mức
+     hoa hồng một dòng. */
+  $sp = null;
+  foreach ($rows as $r) if ($r['kind'] === 'product' && str_contains(strtoupper((string)$r['kv_codes']), 'SP000084')) $sp = $r;
+  if ($sp) {
+    $pdo->prepare("UPDATE services SET name = 'Sản phẩm A – 12%', kv_codes = 'SP000084', comm_pct = 12, grp = 'D' WHERE id = ?")
+        ->execute([$sp['id']]);
+    $ins = $pdo->prepare("INSERT INTO services (name, kind, price, kv_codes, active, sort, wage, comm_pct, discountable, grp)
+                          VALUES (?, 'product', 0, ?, 1, ?, 0, ?, 0, 'D')");
+    $sort = (int)$sp['sort'];
+    foreach ([['Sản phẩm B – 20%', 'SP000085', 20], ['Sản phẩm C – 25%', 'SP000089', 25], ['Sản phẩm S – 50%', '', 50]] as $k)
+      $ins->execute([$k[0], $k[1], $sort, $k[2]]);
+    /* Dòng hàng đã nhập theo mã B, C chuyển sang dịch vụ mới. */
+    $re = $pdo->prepare('UPDATE visit_items SET service_id = (SELECT id FROM services WHERE kv_codes = ? LIMIT 1) WHERE kv_code = ?');
+    foreach (['SP000085', 'SP000089'] as $code) $re->execute([$code, $code]);
+  }
+}
+
+/* Nhóm dịch vụ — chủ đổi tên, thêm nhóm ở Thiết lập → Dịch vụ. */
+function mhGroups(): array {
+  $g = json_decode((string)mhSetting('svc_groups', ''), true);
+  if (!is_array($g) || !$g)
+    $g = [['code' => 'A', 'name' => 'Dịch vụ lẻ'], ['code' => 'B', 'name' => 'Combo'],
+          ['code' => 'C', 'name' => 'Hoá chất'], ['code' => 'D', 'name' => 'Sản phẩm']];
+  return $g;
 }
 
 /* Bản đầu bắt mọi lượt phải có khách (customer_id NOT NULL). Bán hàng thì
@@ -916,6 +978,7 @@ function mhServices(bool $activeOnly): array {
   $rows = db()->query('SELECT * FROM services' . ($activeOnly ? ' WHERE active = 1' : '') . ' ORDER BY sort, id')->fetchAll();
   foreach ($rows as &$s) {
     foreach (['id', 'price', 'active', 'sort', 'wage', 'discountable'] as $k) $s[$k] = (int)$s[$k];
+    $s['grp'] = (string)$s['grp']; $s['note'] = (string)$s['note'];
     $s['comm_pct'] = (float)$s['comm_pct'];
   }
   unset($s);
@@ -927,18 +990,41 @@ function mhServices(bool $activeOnly): array {
    ============================================================
 
    Lương = lương cứng + Σ(tiền thợ mỗi lượt × số lượt) + Σ(% hoa hồng ×
-   tiền thực thu của dòng) + tip (nếu chủ chọn cộng) + thưởng/trừ.
-   Thợ của cả hoá đơn nhận phần của mọi dòng trong hoá đơn đó. */
+   tiền thực thu của dòng) + tip (nếu tip trả cuối tháng) + thưởng/trừ.
+   Thợ của cả hoá đơn nhận phần của mọi dòng trong hoá đơn đó.
+
+   Tip: mặc định trả thợ CUỐI NGÀY từ két (đúng như file chốt ca của quán)
+   — khi đó chốt ca trừ tip ra, lương tháng không cộng nữa. */
+function mhTipMonthly(): bool { return mhSetting('payroll_tip', '0') === '1'; }
+
+/* KPI của tháng; chưa đặt thì lấy tháng gần nhất trước đó. */
+function mhKpi(string $month): array {
+  $ra = [];
+  $st = db()->prepare('SELECT k.* FROM payroll_kpi k WHERE k.month = (SELECT MAX(month) FROM payroll_kpi
+                         WHERE barber_id = k.barber_id AND month <= ?)');
+  $st->execute([$month]);
+  foreach ($st->fetchAll() as $k)
+    $ra[(int)$k['barber_id']] = ['cuts' => (int)$k['cuts'], 'combo' => (int)$k['combo'], 'chem' => (int)$k['chem'],
+                                 'prod' => (int)$k['prod'], 'from' => $k['month']];
+  return $ra;
+}
+
 function mhPayroll(string $month): array {
   $svc = [];
   foreach (mhServices(false) as $s) $svc[$s['id']] = $s;
-  $coTip = mhSetting('payroll_tip', '1') === '1';
+  $coTip = mhTipMonthly();
+  $kpi = mhKpi($month);
 
   $tho = [];
   foreach (mhBarbers() as $b)
     $tho[$b['id']] = ['id' => $b['id'], 'name' => $b['name'], 'active' => $b['active'],
                       'base' => (int)$b['base_salary'], 'bills' => 0, 'revenue' => 0, 'tip' => 0,
-                      'wage' => 0, 'sales' => 0, 'comm' => 0, 'adj' => 0, 'rows' => [], 'adjust' => []];
+                      'wage' => 0, 'sales' => 0, 'comm' => 0, 'adj' => 0, 'rows' => [], 'adjust' => [],
+                      /* Số cho KPI: đầu cắt (dịch vụ cắt không phải combo), số combo,
+                         doanh thu hoá chất, doanh thu sản phẩm — đúng 4 cột "Tổng" ở
+                         bảng lương tay của quán. */
+                      'kpi_now' => ['cuts' => 0, 'combo' => 0, 'chem' => 0, 'prod' => 0],
+                      'kpi' => $kpi[$b['id']] ?? null, 'groups' => []];
 
   $st = db()->prepare("SELECT v.id, v.barber_id, v.amount, v.tip FROM visits v
                         WHERE v.void_at IS NULL AND v.barber_id IS NOT NULL AND v.visit_date LIKE ?");
@@ -969,13 +1055,23 @@ function mhPayroll(string $month): array {
     $tho[$b]['wage'] += $wage;
     $tho[$b]['comm'] += $comm;
     if ($s && $s['comm_pct'] > 0) $tho[$b]['sales'] += $p;
+    $g = $s ? $s['grp'] : '?';
+    $tho[$b]['groups'][$g]['qty'] = ($tho[$b]['groups'][$g]['qty'] ?? 0) + $q;
+    $tho[$b]['groups'][$g]['sales'] = ($tho[$b]['groups'][$g]['sales'] ?? 0) + $p;
+    $k = &$tho[$b]['kpi_now'];
+    if ($s && $s['grp'] === 'B') $k['combo'] += $q;
+    elseif ($s && $s['kind'] === 'cut') $k['cuts'] += $q;
+    if ($s && $s['grp'] === 'C') $k['chem'] += $p;
+    if ($s && ($s['grp'] === 'D' || $s['kind'] === 'product')) $k['prod'] += $p;
+    unset($k);
   }
   $st = db()->prepare('SELECT * FROM payroll_adjust WHERE month = ? ORDER BY id');
   $st->execute([$month]);
   foreach ($st->fetchAll() as $a) {
     $b = (int)$a['barber_id'];
     if (!isset($tho[$b])) continue;
-    $tho[$b]['adjust'][] = ['id' => (int)$a['id'], 'label' => $a['label'], 'amount' => (int)$a['amount']];
+    $tho[$b]['adjust'][] = ['id' => (int)$a['id'], 'label' => $a['label'], 'amount' => (int)$a['amount'],
+                            'qty' => (int)$a['qty'], 'rate' => (int)$a['rate'], 'recurring' => (int)$a['recurring']];
     $tho[$b]['adj'] += (int)$a['amount'];
   }
   $ra = [];
@@ -987,5 +1083,29 @@ function mhPayroll(string $month): array {
   }
   $st = db()->prepare('SELECT COUNT(*) FROM visits WHERE void_at IS NULL AND barber_id IS NULL AND visit_date LIKE ?');
   $st->execute([$month . '-%']);
-  return ['month' => $month, 'rows' => $ra, 'tip_included' => $coTip, 'no_barber' => (int)$st->fetchColumn()];
+  return ['month' => $month, 'rows' => $ra, 'tip_included' => $coTip, 'no_barber' => (int)$st->fetchColumn(),
+          'groups' => mhGroups()];
+}
+
+/* ============================================================
+   Chốt ca
+   ============================================================
+
+   Tiền phải có trong két = tiền đầu ca + tiền mặt thu từ hoá đơn
+   ± ngoài luồng − tip trả thợ từ két (nếu tip trả hằng ngày).
+   Giống hệt công thức file "Augustus - Chốt ca": đầu ca + doanh thu −
+   chuyển khoản − tip ± ngoài luồng. */
+function mhShiftCalc(string $date, int $opening): array {
+  $st = db()->prepare('SELECT COALESCE(SUM(pay_cash),0) c, COALESCE(SUM(pay_transfer),0) t, COALESCE(SUM(tip),0) tip,
+                              COALESCE(SUM(amount),0) a, COUNT(*) n
+                         FROM visits WHERE void_at IS NULL AND visit_date = ?');
+  $st->execute([$date]);
+  $v = $st->fetch();
+  $st = db()->prepare('SELECT COALESCE(SUM(amount),0) FROM cash_moves WHERE void_at IS NULL AND move_date = ?');
+  $st->execute([$date]);
+  $moves = (int)$st->fetchColumn();
+  $tipsOut = mhTipMonthly() ? 0 : (int)$v['tip'];
+  return ['opening' => $opening, 'cash_sales' => (int)$v['c'], 'transfer' => (int)$v['t'], 'revenue' => (int)$v['a'],
+          'tips' => (int)$v['tip'], 'tips_out' => $tipsOut, 'moves' => $moves, 'bills' => (int)$v['n'],
+          'expected' => $opening + (int)$v['c'] + $moves - $tipsOut];
 }

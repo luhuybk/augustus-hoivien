@@ -37,6 +37,13 @@ $action = (string)($req['action'] ?? '');
 function inp(string $k, $default = null) { global $req; return $req[$k] ?? $default; }
 function validDate($s): bool { return is_string($s) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $s) && strtotime($s) !== false; }
 
+/* Ngày quầy được đụng tới: chỉ hôm nay. Chủ thì ngày nào cũng được. */
+function shiftDate(array $u): string {
+  $d = inp('date');
+  if (mhIsOwner($u) && validDate($d) && $d <= mhToday()) return $d;
+  return mhToday();
+}
+
 /* Thẻ khách đầy đủ — thứ quầy nhìn vào khi khách đứng trước mặt.
    Quầy thấy số đã che và 5 lượt gần nhất; chủ thấy hết. */
 function customerCard(int $cid, array $u): array {
@@ -333,7 +340,7 @@ case 'pos_init': {
        'barbers' => array_map(function ($b) { return ['id' => $b['id'], 'name' => $b['name']]; }, mhBarbers(true)),
        'promos' => array_map(function ($p) { return ['id' => $p['id'], 'name' => $p['name'], 'kind' => $p['kind'], 'value' => $p['value']]; },
                              mhPromos(true)),
-       'today' => mhToday()]);
+       'groups' => mhGroups(), 'today' => mhToday()]);
 }
 
 /* Tạo hoá đơn. Giá, giảm giá đều tính lại ở máy chủ từ bảng dịch vụ —
@@ -695,8 +702,25 @@ case 'day': {
     return ['gift' => $g['gift'], 'time' => date('H:i', (int)$g['given_at']),
             'customer_id' => (int)$g['cid'], 'name' => $g['name'], 'by' => $g['by_name']];
   }, $st->fetchAll());
-  out(['ok' => true, 'date' => $date, 'visits' => $visits, 'gifts' => $gifts,
-       'shop' => MH_SHOP_NAME, 'tip_included' => mhSetting('payroll_tip', '1') === '1']);
+  $st = db()->prepare('SELECT m.*, u.name AS by_name FROM cash_moves m LEFT JOIN users u ON u.id = m.created_by
+                        WHERE m.move_date = ? AND m.void_at IS NULL ORDER BY m.id');
+  $st->execute([$date]);
+  $moves = array_map(function ($m) use ($u, $owner) {
+    return ['id' => (int)$m['id'], 'amount' => (int)$m['amount'], 'note' => $m['note'], 'by' => $m['by_name'],
+            'time' => date('H:i', (int)$m['created_at']), 'can_del' => $owner || $m['move_date'] === mhToday()];
+  }, $st->fetchAll());
+  $st = db()->prepare('SELECT s.*, u.name AS by_name FROM shift_close s LEFT JOIN users u ON u.id = s.closed_by WHERE close_date = ?');
+  $st->execute([$date]);
+  $close = $st->fetch() ?: null;
+  if ($close) foreach ($close as $k => $v) if (is_numeric($v) && $k !== 'close_date') $close[$k] = (int)$v;
+  /* Tiền đầu ca gợi ý = tiền để lại tủ của lần chốt gần nhất trước đó. */
+  $st = db()->prepare('SELECT keep, close_date FROM shift_close WHERE close_date < ? ORDER BY close_date DESC LIMIT 1');
+  $st->execute([$date]);
+  $truoc = $st->fetch() ?: null;
+  out(['ok' => true, 'date' => $date, 'visits' => $visits, 'gifts' => $gifts, 'moves' => $moves, 'close' => $close,
+       'prev_keep' => $truoc ? (int)$truoc['keep'] : null, 'prev_date' => $truoc ? $truoc['close_date'] : null,
+       'shift' => mhShiftCalc($date, $close ? (int)$close['opening'] : ($truoc ? (int)$truoc['keep'] : 0)),
+       'shop' => MH_SHOP_NAME, 'tip_monthly' => mhTipMonthly()]);
 }
 
 /* ===== danh mục ===== */
@@ -706,7 +730,7 @@ case 'services': {
   $rows = mhServices(!mhIsOwner($u));
   if (!mhIsOwner($u)) foreach ($rows as &$s) unset($s['wage'], $s['comm_pct']);
   unset($s);
-  out(['ok' => true, 'rows' => $rows, 'kinds' => MH_KINDS]);
+  out(['ok' => true, 'rows' => $rows, 'kinds' => MH_KINDS, 'groups' => mhGroups()]);
 }
 
 /* Lưu cả bảng dịch vụ một lần. Dòng bị bỏ khỏi bảng thì TẮT chứ không
@@ -719,6 +743,17 @@ case 'services_save': {
   $u = mhRequireOwner();
   $rows = inp('rows', []);
   if (!is_array($rows)) out(['ok' => false, 'error' => 'Dữ liệu không đúng.'], 400);
+
+  /* Nhóm: mã A, B, C… và tên. Dịch vụ thuộc nhóm đã bị bỏ thì về nhóm đầu. */
+  $nhom = [];
+  foreach ((array)inp('groups', []) as $g) {
+    $code = mb_strtoupper(trim((string)($g['code'] ?? '')));
+    $ten = trim((string)($g['name'] ?? ''));
+    if ($code === '' || $ten === '' || isset($nhom[$code])) continue;
+    $nhom[$code] = ['code' => mb_substr($code, 0, 3), 'name' => mb_substr($ten, 0, 40)];
+  }
+  if (!$nhom) $nhom = array_column(mhGroups(), null, 'code');
+  $dauTien = array_key_first($nhom);
 
   $seenCode = [];
   foreach ($rows as $i => $r) {
@@ -736,14 +771,17 @@ case 'services_save': {
   $pdo = db();
   $pdo->beginTransaction();
   $giu = [];
-  $up  = $pdo->prepare('UPDATE services SET name=?, kind=?, price=?, kv_codes=?, active=?, sort=?, wage=?, comm_pct=?, discountable=? WHERE id=?');
-  $ins = $pdo->prepare('INSERT INTO services (name, kind, price, kv_codes, active, sort, wage, comm_pct, discountable) VALUES (?,?,?,?,?,?,?,?,?)');
+  $pdo->prepare("INSERT INTO settings (key, value) VALUES ('svc_groups', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      ->execute([json_encode(array_values($nhom), JSON_UNESCAPED_UNICODE)]);
+  $up  = $pdo->prepare('UPDATE services SET name=?, kind=?, price=?, kv_codes=?, active=?, sort=?, wage=?, comm_pct=?, discountable=?, grp=?, note=? WHERE id=?');
+  $ins = $pdo->prepare('INSERT INTO services (name, kind, price, kv_codes, active, sort, wage, comm_pct, discountable, grp, note) VALUES (?,?,?,?,?,?,?,?,?,?,?)');
   foreach (array_values($rows) as $i => $r) {
     $codes = implode(',', array_filter(array_map(function ($c) { return trim($c); },
                                                  explode(',', (string)($r['kv_codes'] ?? '')))));
     $vals = [trim((string)$r['name']), $r['kind'], max(0, (int)($r['price'] ?? 0)), $codes,
              !empty($r['active']) ? 1 : 0, $i + 1, max(0, (int)($r['wage'] ?? 0)),
-             max(0, min(100, round((float)($r['comm_pct'] ?? 0), 2))), !empty($r['discountable']) ? 1 : 0];
+             max(0, min(100, round((float)($r['comm_pct'] ?? 0), 2))), !empty($r['discountable']) ? 1 : 0,
+             isset($nhom[$r['grp'] ?? '']) ? $r['grp'] : $dauTien, mb_substr(trim((string)($r['note'] ?? '')), 0, 500)];
     if (!empty($r['id'])) { $up->execute(array_merge($vals, [(int)$r['id']])); $giu[] = (int)$r['id']; }
     else { $ins->execute($vals); $giu[] = (int)$pdo->lastInsertId(); }
   }
@@ -1177,15 +1215,18 @@ case 'payroll': {
 case 'payroll_adjust_add': {
   $u = mhRequireOwner();
   $m = (string)inp('month', ''); $bid = (int)inp('barber_id', 0);
-  $label = trim((string)inp('label', '')); $amt = (int)inp('amount', 0);
+  $label = trim((string)inp('label', ''));
+  $qty = max(1, min(10000, (int)inp('qty', 1)));
+  $rate = abs((int)inp('rate', 0));
+  $amt = (inp('sign', 1) < 0 ? -1 : 1) * $qty * $rate;
   if (!preg_match('/^\d{4}-\d{2}$/', $m)) out(['ok' => false, 'error' => 'Tháng không đúng.'], 400);
   if (!in_array($bid, array_column(mhBarbers(), 'id'), true)) out(['ok' => false, 'error' => 'Không có thợ này.'], 400);
   if ($label === '') out(['ok' => false, 'error' => 'Ghi nội dung (thưởng, ứng lương…).'], 400);
-  if ($amt === 0) out(['ok' => false, 'error' => 'Nhập số tiền (số âm là trừ).'], 400);
+  if ($amt === 0) out(['ok' => false, 'error' => 'Nhập số tiền.'], 400);
   $st = db()->prepare('SELECT 1 FROM payroll_closed WHERE month = ?'); $st->execute([$m]);
   if ($st->fetchColumn()) out(['ok' => false, 'error' => 'Tháng này đã chốt lương — mở lại rồi mới sửa.'], 409);
-  db()->prepare('INSERT INTO payroll_adjust (month, barber_id, label, amount, created_at, created_by) VALUES (?,?,?,?,?,?)')
-      ->execute([$m, $bid, mb_substr($label, 0, 120), $amt, time(), $u['id']]);
+  db()->prepare('INSERT INTO payroll_adjust (month, barber_id, label, amount, qty, rate, recurring, created_at, created_by) VALUES (?,?,?,?,?,?,?,?,?)')
+      ->execute([$m, $bid, mb_substr($label, 0, 120), $amt, $qty, $rate, inp('recurring') ? 1 : 0, time(), $u['id']]);
   mhAudit($u['id'], 'payroll_adjust', "$m thợ #$bid · $label · $amt");
   out(['ok' => true, 'closed' => null] + mhPayroll($m));
 }
@@ -1200,6 +1241,93 @@ case 'payroll_adjust_del': {
   db()->prepare('DELETE FROM payroll_adjust WHERE id = ?')->execute([(int)$a['id']]);
   mhAudit($u['id'], 'payroll_adjust_del', $a['month'] . ' · ' . $a['label'] . ' · ' . $a['amount']);
   out(['ok' => true, 'closed' => null] + mhPayroll($a['month']));
+}
+
+/* Chép các khoản "hằng tháng" (tiền xăng, bảo hiểm, cafe…) từ tháng gần
+   nhất có các khoản đó sang tháng này. */
+case 'payroll_adjust_copy': {
+  $u = mhRequireOwner();
+  $m = (string)inp('month', ''); $bid = (int)inp('barber_id', 0);
+  if (!preg_match('/^\d{4}-\d{2}$/', $m)) out(['ok' => false, 'error' => 'Tháng không đúng.'], 400);
+  $st = db()->prepare('SELECT 1 FROM payroll_closed WHERE month = ?'); $st->execute([$m]);
+  if ($st->fetchColumn()) out(['ok' => false, 'error' => 'Tháng này đã chốt lương — mở lại rồi mới sửa.'], 409);
+  $st = db()->prepare('SELECT MAX(month) FROM payroll_adjust WHERE barber_id = ? AND recurring = 1 AND month < ?');
+  $st->execute([$bid, $m]);
+  $tu = $st->fetchColumn();
+  if (!$tu) out(['ok' => false, 'error' => 'Chưa có khoản nào đánh dấu "hằng tháng" ở các tháng trước.'], 404);
+  $st = db()->prepare('SELECT * FROM payroll_adjust WHERE barber_id = ? AND recurring = 1 AND month = ?');
+  $st->execute([$bid, $tu]);
+  $co = db()->prepare('SELECT 1 FROM payroll_adjust WHERE barber_id = ? AND month = ? AND label = ?');
+  $ins = db()->prepare('INSERT INTO payroll_adjust (month, barber_id, label, amount, qty, rate, recurring, created_at, created_by) VALUES (?,?,?,?,?,?,1,?,?)');
+  $n = 0;
+  foreach ($st->fetchAll() as $a) {
+    $co->execute([$bid, $m, $a['label']]);
+    if ($co->fetchColumn()) continue;           // đã có rồi thì thôi, bấm hai lần không nhân đôi
+    $ins->execute([$m, $bid, $a['label'], $a['amount'], $a['qty'], $a['rate'], time(), $u['id']]);
+    $n++;
+  }
+  mhAudit($u['id'], 'payroll_adjust', "$m thợ #$bid · chép $n khoản hằng tháng từ $tu");
+  out(['ok' => true, 'copied' => $n, 'closed' => null] + mhPayroll($m));
+}
+
+case 'payroll_kpi_save': {
+  $u = mhRequireOwner();
+  $m = (string)inp('month', ''); $bid = (int)inp('barber_id', 0);
+  if (!preg_match('/^\d{4}-\d{2}$/', $m)) out(['ok' => false, 'error' => 'Tháng không đúng.'], 400);
+  if (!in_array($bid, array_column(mhBarbers(), 'id'), true)) out(['ok' => false, 'error' => 'Không có thợ này.'], 400);
+  $v = array_map(function ($k) { return max(0, (int)inp($k, 0)); }, ['cuts' => 'cuts', 'combo' => 'combo', 'chem' => 'chem', 'prod' => 'prod']);
+  db()->prepare('INSERT OR REPLACE INTO payroll_kpi (month, barber_id, cuts, combo, chem, prod) VALUES (?,?,?,?,?,?)')
+      ->execute([$m, $bid, $v['cuts'], $v['combo'], $v['chem'], $v['prod']]);
+  mhAudit($u['id'], 'payroll_kpi', "$m thợ #$bid · " . json_encode($v));
+  out(['ok' => true, 'closed' => null] + mhPayroll($m));
+}
+
+/* ===== chốt ca ===== */
+
+case 'cash_move_add': {
+  $u = mhRequireUser();
+  $date = shiftDate($u);
+  $amt = (int)inp('amount', 0); $note = trim((string)inp('note', ''));
+  if ($amt === 0 || abs($amt) > 50000000) out(['ok' => false, 'error' => 'Nhập số tiền.'], 400);
+  if ($note === '') out(['ok' => false, 'error' => 'Ghi nội dung (mua đá, thu hộ…).'], 400);
+  db()->prepare('INSERT INTO cash_moves (move_date, amount, note, created_at, created_by) VALUES (?,?,?,?,?)')
+      ->execute([$date, $amt, mb_substr($note, 0, 200), time(), $u['id']]);
+  mhAudit($u['id'], 'cash_move', "$date · $note · $amt");
+  out(['ok' => true]);
+}
+
+case 'cash_move_del': {
+  $u = mhRequireUser();
+  $st = db()->prepare('SELECT * FROM cash_moves WHERE id = ?'); $st->execute([(int)inp('id', 0)]);
+  $m = $st->fetch();
+  if (!$m || $m['void_at'] !== null) out(['ok' => false, 'error' => 'Không tìm thấy.'], 404);
+  if (!mhIsOwner($u) && $m['move_date'] !== mhToday())
+    out(['ok' => false, 'error' => 'Chỉ sửa được khoản của hôm nay.'], 403);
+  db()->prepare('UPDATE cash_moves SET void_at = ?, void_by = ? WHERE id = ?')->execute([time(), $u['id'], $m['id']]);
+  mhAudit($u['id'], 'cash_move_del', $m['move_date'] . ' · ' . $m['note'] . ' · ' . $m['amount']);
+  out(['ok' => true]);
+}
+
+/* Chốt ca: quầy nhập tiền đầu ca và tiền đếm được trong tủ; mọi con số
+   khác máy chủ tự cộng từ hoá đơn. Chốt lại trong ngày thì ghi đè. */
+case 'shift_close': {
+  $u = mhRequireUser();
+  $date = shiftDate($u);
+  $opening = max(0, (int)inp('opening', 0));
+  $counted = max(0, (int)inp('counted', 0));
+  $keep = max(0, (int)inp('keep', 0));
+  if ($keep > $counted) out(['ok' => false, 'error' => 'Tiền để lại tủ không thể nhiều hơn tiền đếm được.'], 400);
+  $c = mhShiftCalc($date, $opening);
+  $diff = $counted - $c['expected'];
+  $note = mb_substr(trim((string)inp('note', '')), 0, 300);
+  if ($diff !== 0 && $note === '') out(['ok' => false, 'code' => 'need_note',
+       'error' => 'Tiền trong tủ lệch ' . number_format($diff, 0, ',', '.') . 'đ — ghi lý do vào ô ghi chú rồi chốt.'], 400);
+  db()->prepare('INSERT OR REPLACE INTO shift_close (close_date, opening, cash_sales, transfer, tips_out, moves, expected, counted, diff, keep, note, closed_at, closed_by)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      ->execute([$date, $opening, $c['cash_sales'], $c['transfer'], $c['tips_out'], $c['moves'], $c['expected'],
+                 $counted, $diff, $keep, $note, time(), $u['id']]);
+  mhAudit($u['id'], 'shift_close', "$date · phải có " . $c['expected'] . " · đếm $counted · lệch $diff");
+  out(['ok' => true, 'diff' => $diff]);
 }
 
 /* Chốt: chụp lại bảng lương. Sau đó đổi tiền công dịch vụ, huỷ hoá đơn
