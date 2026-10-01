@@ -6,8 +6,10 @@
    và luôn trả {"ok":true, ...} hoặc {"ok":false,"error":"..."}.
 
    Tài khoản quầy dùng chung, nên phần lớn chỗ khó ở file này là giữ cho
-   quầy làm đúng việc của quầy: tra khách, ghi lượt HÔM NAY, trao quà,
-   tự huỷ lượt mình vừa ghi nhầm — và không hơn thế.
+   quầy làm đúng việc của quầy: tra khách, tạo hoá đơn HÔM NAY, trao quà,
+   chốt ca — và không hơn thế. Quầy không sửa, không huỷ được hoá đơn; ghi
+   nhầm thì bấm "Báo sai", chủ quán sửa. Tài khoản thợ chỉ xem hoá đơn của
+   chính mình và báo sai (xem MH_BARBER_ACTIONS ở lib.php).
    ============================================================ */
 declare(strict_types=1);
 
@@ -55,10 +57,8 @@ function customerCard(int $cid, array $u): array {
 
   $visits = mhVisitList('v.customer_id = ?' . ($owner ? '' : ' AND v.void_at IS NULL'),
                         [$cid], $owner ? 500 : 5);
-  $han = time() - MH_UNDO_MINUTES * 60;
   foreach ($visits as &$v) {
-    $v['can_void'] = $v['void_at'] === null && ($owner
-      || ($v['source'] === 'counter' && $v['created_by'] === $u['id'] && $v['created_at'] >= $han));
+    $v['can_void'] = $owner && $v['void_at'] === null;
     unset($v['customer_phone']);
   }
   unset($v);
@@ -191,7 +191,7 @@ case 'logout': {
 
 case 'me': {
   $u = mhRequireUser();
-  out(['ok' => true, 'user' => ['id' => $u['id'], 'name' => $u['name'], 'role' => $u['role']],
+  out(['ok' => true, 'user' => ['id' => $u['id'], 'name' => $u['name'], 'role' => $u['role'], 'barber_id' => $u['barber_id']],
        'shop' => MH_SHOP_NAME, 'kinds' => MH_KINDS, 'undo_minutes' => MH_UNDO_MINUTES,
        'today' => mhToday()]);
 }
@@ -340,7 +340,8 @@ case 'pos_init': {
        'barbers' => array_map(function ($b) { return ['id' => $b['id'], 'name' => $b['name']]; }, mhBarbers(true)),
        'promos' => array_map(function ($p) { return ['id' => $p['id'], 'name' => $p['name'], 'kind' => $p['kind'], 'value' => $p['value']]; },
                              mhPromos(true)),
-       'groups' => mhGroups(), 'round' => mhRoundCfg(), 'today' => mhToday()]);
+       'groups' => mhGroups(), 'round' => mhRoundCfg(), 'today' => mhToday(),
+       'product_names' => mhProductNames()]);
 }
 
 /* Tạo hoá đơn. Giá, giảm giá đều tính lại ở máy chủ từ bảng dịch vụ —
@@ -348,6 +349,15 @@ case 'pos_init': {
 case 'bill_create': {
   $u = mhRequireUser();
   $owner = mhIsOwner($u);
+  $ref = preg_match('/^[A-Za-z0-9_-]{8,40}$/', (string)inp('client_ref', '')) ? (string)inp('client_ref') : null;
+  if ($ref !== null) {
+    $st = db()->prepare('SELECT id, customer_id FROM visits WHERE client_ref = ?'); $st->execute([$ref]);
+    if ($cu = $st->fetch()) {
+      $bill = mhVisitList('v.id = ?', [(int)$cu['id']], 1)[0];
+      if (!$owner) $bill['customer_phone'] = mhMask((string)$bill['customer_phone']);
+      out(['ok' => true, 'bill' => $bill, 'new_rewards' => [], 'pending' => 0, 'repeat' => true]);
+    }
+  }
   $cid = (int)inp('customer_id', 0) ?: null;
   $c = null;
   if ($cid && !($c = mhCustomerRow($cid))) out(['ok' => false, 'error' => 'Không tìm thấy khách.'], 404);
@@ -380,7 +390,12 @@ case 'bill_create': {
     $md = max(0, (int)($it['mdisc'] ?? 0));
     if ($md > $unit * $qty)
       out(['ok' => false, 'error' => 'Giảm thêm cho "' . $s['name'] . '" lớn hơn giá món.'], 400);
-    $lines[] = ['svc' => $s, 'qty' => $qty, 'unit' => $unit, 'mdisc' => $md];
+    /* Dòng sản phẩm ("Sản phẩm A – 12%") phải ghi tên món cụ thể — để biết
+       đã bán gì, đối chiếu kho. */
+    $dt = mb_substr(trim(preg_replace('/\s+/u', ' ', (string)($it['detail'] ?? ''))), 0, 80);
+    if ($s['kind'] === 'product' && $dt === '')
+      out(['ok' => false, 'error' => 'Ghi tên sản phẩm cho dòng "' . $s['name'] . '".'], 400);
+    $lines[] = ['svc' => $s, 'qty' => $qty, 'unit' => $unit, 'mdisc' => $md, 'detail' => $dt];
     if ($s['kind'] === 'cut') $coCat = true;
   }
 
@@ -441,21 +456,22 @@ case 'bill_create': {
   $pdo = db();
   $pdo->beginTransaction();
   $pdo->prepare('INSERT INTO visits (customer_id, visit_date, visit_time, amount, subtotal, discount, disc_note, tip,
-                                     pay_cash, pay_transfer, mdisc, mdisc_note, source, note, barber_id, created_at, created_by)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+                                     pay_cash, pay_transfer, mdisc, mdisc_note, source, note, barber_id, created_at, created_by, client_ref)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
       ->execute([$cid, $date, $date === mhToday() ? date('H:i') : '', $q['total'], $q['subtotal'], $q['discount'],
                  $ghiChuGiam, $tip, $cash, $ck, $q['mdisc'], $lyDo, $owner ? 'owner' : 'counter',
-                 mb_substr(trim((string)inp('note', '')), 0, 300), $bid, time(), $u['id']]);
+                 mb_substr(trim((string)inp('note', '')), 0, 300), $bid, time(), $u['id'], $ref]);
   $vid = (int)$pdo->lastInsertId();
-  $ins = $pdo->prepare('INSERT INTO visit_items (visit_id, service_id, name, kind, qty, price, list_price, disc, mdisc) VALUES (?,?,?,?,?,?,?,?,?)');
+  $ins = $pdo->prepare('INSERT INTO visit_items (visit_id, service_id, name, kind, qty, price, list_price, disc, mdisc, detail) VALUES (?,?,?,?,?,?,?,?,?,?)');
   foreach ($lines as $i => $l)
     $ins->execute([$vid, $l['svc']['id'], $l['svc']['name'], $l['svc']['kind'], $l['qty'],
-                   $q['lines'][$i]['net'], $l['unit'], $q['lines'][$i]['disc'], $q['lines'][$i]['mdisc']]);
+                   $q['lines'][$i]['net'], $l['unit'], $q['lines'][$i]['disc'], $q['lines'][$i]['mdisc'], $l['detail']]);
   $pdo->commit();
 
   $moi = $c ? array_values(array_diff_key(pendingKeys($cid), $truoc)) : [];
   mhAudit($u['id'], 'bill_create', "#$vid " . ($c ? "khách #$cid" : 'khách lẻ') . ' · '
-          . implode(', ', array_map(function ($l) { return $l['svc']['name'] . ($l['qty'] > 1 ? ' x' . $l['qty'] : ''); }, $lines))
+          . implode(', ', array_map(function ($l) { return $l['svc']['name'] . ($l['detail'] !== '' ? ' (' . $l['detail'] . ')' : '')
+                                                         . ($l['qty'] > 1 ? ' x' . $l['qty'] : ''); }, $lines))
           . ' · ' . $q['total'] . ($tip ? " + tip $tip" : '') . ' · TM ' . $cash . ' / CK ' . $ck
           . ($q['mdisc'] ? ' · ⚠ giảm tay ' . $q['mdisc'] . ' (' . $lyDo . ')' : ''));
   $bill = mhVisitList('v.id = ?', [$vid], 1)[0];
@@ -472,21 +488,14 @@ case 'bill_create': {
 /* Huỷ lượt: quầy chỉ huỷ được lượt chính mình vừa ghi, trong vài phút.
    Không xoá — đánh dấu huỷ, ghi ai huỷ và vì sao. */
 case 'visit_void': {
-  $u = mhRequireUser();
+  $u = mhRequireOwner();
   $id = (int)inp('id', 0);
   $reason = trim((string)inp('reason', ''));
   $st = db()->prepare('SELECT * FROM visits WHERE id = ?');
   $st->execute([$id]);
   $v = $st->fetch();
-  if (!$v) out(['ok' => false, 'error' => 'Không tìm thấy lượt này.'], 404);
-  if ($v['void_at'] !== null) out(['ok' => false, 'error' => 'Lượt này đã huỷ rồi.'], 409);
-  if (!mhIsOwner($u)) {
-    if ($v['source'] !== 'counter' || (int)$v['created_by'] !== $u['id'])
-      out(['ok' => false, 'error' => 'Chỉ huỷ được lượt do chính tài khoản này ghi.'], 403);
-    if ((int)$v['created_at'] < time() - MH_UNDO_MINUTES * 60)
-      out(['ok' => false, 'error' => 'Quá ' . MH_UNDO_MINUTES . ' phút rồi — nhờ chủ quán huỷ giúp.'], 403);
-    if ($reason === '') $reason = 'Quầy ghi nhầm';
-  }
+  if (!$v) out(['ok' => false, 'error' => 'Không tìm thấy hoá đơn này.'], 404);
+  if ($v['void_at'] !== null) out(['ok' => false, 'error' => 'Hoá đơn này đã huỷ rồi.'], 409);
   if ($reason === '') out(['ok' => false, 'error' => 'Ghi lý do huỷ.'], 400);
   db()->prepare('UPDATE visits SET void_at = ?, void_by = ?, void_reason = ? WHERE id = ?')
       ->execute([time(), $u['id'], $reason, $id]);
@@ -494,19 +503,15 @@ case 'visit_void': {
   out(['ok' => true] + ($v['customer_id'] !== null ? customerCard((int)$v['customer_id'], $u) : []));
 }
 
-/* Đổi thợ của một lượt đã ghi (chọn nhầm). Cùng luật với huỷ lượt: quầy
-   chỉ sửa được lượt mình vừa ghi, trong vài phút. */
+/* Đổi thợ của một hoá đơn đã tạo (chọn nhầm) — chỉ chủ quán. */
 case 'visit_barber': {
-  $u = mhRequireUser();
+  $u = mhRequireOwner();
   $id  = (int)inp('id', 0);
   $bid = (int)inp('barber_id', 0) ?: null;
   $st = db()->prepare('SELECT * FROM visits WHERE id = ?');
   $st->execute([$id]);
   $v = $st->fetch();
-  if (!$v || $v['void_at'] !== null) out(['ok' => false, 'error' => 'Không tìm thấy lượt này.'], 404);
-  if (!mhIsOwner($u) && ($v['source'] !== 'counter' || (int)$v['created_by'] !== $u['id']
-                         || (int)$v['created_at'] < time() - MH_UNDO_MINUTES * 60))
-    out(['ok' => false, 'error' => 'Chỉ sửa được lượt mình vừa ghi trong ' . MH_UNDO_MINUTES . ' phút.'], 403);
+  if (!$v || $v['void_at'] !== null) out(['ok' => false, 'error' => 'Không tìm thấy hoá đơn này.'], 404);
   if ($bid !== null && !in_array($bid, array_column(mhBarbers(), 'id'), true))
     out(['ok' => false, 'error' => 'Không có thợ này.'], 400);
   db()->prepare('UPDATE visits SET barber_id = ? WHERE id = ?')->execute([$bid, $id]);
@@ -514,9 +519,79 @@ case 'visit_barber': {
   out(['ok' => true] + ($v['customer_id'] !== null ? customerCard((int)$v['customer_id'], $u) : []));
 }
 
-/* Gộp khách trùng: mọi lượt, quà đã trao, số phụ của khách "from" chuyển
-   sang khách "into", số chính của "from" thành số phụ của "into", rồi xoá
-   "from". Dùng khi một người có hai số, hoặc lỡ tạo hai lần. */
+/* Báo sai một hoá đơn (nhầm thợ, nhầm món, giảm bậy…) hoặc báo thiếu hoá
+   đơn (không có visit_id). Quầy và thợ dùng; chủ xử lý ở màn Hoá đơn. */
+case 'report_add': {
+  $u = mhRequireUser();
+  $note = mb_substr(trim((string)inp('note', '')), 0, 300);
+  if (mb_strlen($note) < 3) out(['ok' => false, 'error' => 'Ghi rõ sai ở đâu (vd: "không phải em cắt", "thiếu 1 hoá đơn cắt 14h").'], 400);
+  $vid = (int)inp('visit_id', 0) ?: null;
+  if ($vid) {
+    $st = db()->prepare('SELECT * FROM visits WHERE id = ?'); $st->execute([$vid]);
+    $v = $st->fetch();
+    if (!$v) out(['ok' => false, 'error' => 'Không tìm thấy hoá đơn này.'], 404);
+    /* Thợ chỉ báo được hoá đơn của mình, hoặc hoá đơn chưa ghi thợ (để nhận). */
+    if ($u['role'] === 'barber' && $v['barber_id'] !== null && (int)$v['barber_id'] !== $u['barber_id'])
+      out(['ok' => false, 'error' => 'Hoá đơn này không phải của bạn.'], 403);
+    $date = $v['visit_date'];
+  } else {
+    $date = validDate(inp('date')) ? inp('date') : mhToday();
+    if ($date > mhToday() || $date < date('Y-m-d', strtotime('-45 days')))
+      out(['ok' => false, 'error' => 'Chỉ báo được cho 45 ngày gần đây.'], 400);
+  }
+  $st = db()->prepare("SELECT COUNT(*) FROM bill_reports WHERE created_by = ? AND created_at > ?");
+  $st->execute([$u['id'], time() - 3600]);
+  if ((int)$st->fetchColumn() >= 30) out(['ok' => false, 'error' => 'Báo nhiều quá — đợi một lát.'], 429);
+  db()->prepare('INSERT INTO bill_reports (visit_id, report_date, note, created_at, created_by) VALUES (?,?,?,?,?)')
+      ->execute([$vid, $date, $note, time(), $u['id']]);
+  mhAudit($u['id'], 'report_add', ($vid ? "HĐ #$vid" : "thiếu HĐ $date") . ' · ' . $note);
+  out(['ok' => true]);
+}
+
+case 'report_resolve': {
+  $u = mhRequireOwner();
+  $id = (int)inp('id', 0);
+  $reply = mb_substr(trim((string)inp('reply', '')), 0, 300);
+  $mo = inp('reopen') ? 1 : 0;
+  $st = db()->prepare('SELECT * FROM bill_reports WHERE id = ?'); $st->execute([$id]);
+  if (!$st->fetch()) out(['ok' => false, 'error' => 'Không tìm thấy.'], 404);
+  if ($mo) db()->prepare("UPDATE bill_reports SET status = 'open', resolved_at = NULL, resolved_by = NULL WHERE id = ?")->execute([$id]);
+  else db()->prepare("UPDATE bill_reports SET status = 'done', reply = ?, resolved_at = ?, resolved_by = ? WHERE id = ?")
+           ->execute([$reply, time(), $u['id'], $id]);
+  mhAudit($u['id'], 'report_resolve', "#$id" . ($mo ? ' mở lại' : ' · ' . $reply));
+  out(['ok' => true]);
+}
+
+/* Tài khoản thợ: hoá đơn của chính mình theo tháng, đếm theo món — để tự
+   soát có bị xuất thiếu, nhầm thợ không. Kèm hoá đơn chưa ghi thợ trong
+   tháng để nhận, và những lần mình đã báo. */
+case 'my_bills': {
+  $u = mhRequireUser();
+  if ($u['role'] !== 'barber' || !$u['barber_id'])
+    out(['ok' => false, 'error' => 'Tài khoản này chưa gắn với thợ nào — nhờ chủ quán gắn ở Thiết lập → Tài khoản.'], 403);
+  $m = (string)inp('month', substr(mhToday(), 0, 7));
+  if (!preg_match('/^\d{4}-\d{2}$/', $m) || $m > substr(mhToday(), 0, 7)) $m = substr(mhToday(), 0, 7);
+  $tu = $m . '-01'; $den = date('Y-m-t', strtotime($tu));
+  $che = function (array $ds) {
+    foreach ($ds as &$v) {
+      $v['customer_phone'] = mhMask((string)$v['customer_phone']);
+      $v['can_void'] = false;
+      unset($v['created_by'], $v['void_by']);
+    }
+    return $ds;
+  };
+  $rows = $che(mhVisitList('v.barber_id = ? AND v.visit_date BETWEEN ? AND ?', [$u['barber_id'], $tu, $den], 3000));
+  $chua = $che(mhVisitList("v.barber_id IS NULL AND v.void_at IS NULL AND v.source <> 'import' AND v.visit_date BETWEEN ? AND ?",
+                           [$tu, $den], 300));
+  $st = db()->prepare('SELECT r.*, u.name AS by_name, ru.name AS res_name FROM bill_reports r
+                         LEFT JOIN users u ON u.id = r.created_by LEFT JOIN users ru ON ru.id = r.resolved_by
+                        WHERE r.created_by = ? AND r.report_date BETWEEN ? AND ? ORDER BY r.id DESC');
+  $st->execute([$u['id'], $tu, $den]);
+  $b = array_values(array_filter(mhBarbers(), function ($x) use ($u) { return $x['id'] === $u['barber_id']; }))[0] ?? null;
+  out(['ok' => true, 'month' => $m, 'barber' => $b ? $b['name'] : '', 'rows' => $rows, 'unassigned' => $chua,
+       'reports' => array_map('mhReportRow', $st->fetchAll())]);
+}
+
 case 'customer_merge': {
   $u = mhRequireOwner();
   $into = (int)inp('into', 0);
@@ -716,18 +791,19 @@ case 'bills': {
     $ids = [0]; $mon = [];
     foreach (db()->query('SELECT id, name FROM customers')->fetchAll() as $c)
       if (str_contains(mhFold((string)$c['name']), $f)) $ids[] = (int)$c['id'];
-    foreach (db()->query('SELECT DISTINCT name FROM visit_items')->fetchAll(PDO::FETCH_COLUMN) as $n)
+    foreach (db()->query("SELECT DISTINCT name FROM visit_items UNION SELECT DISTINCT detail FROM visit_items WHERE detail <> ''")
+               ->fetchAll(PDO::FETCH_COLUMN) as $n)
       if (str_contains(mhFold((string)$n), $f)) $mon[] = $n;
+    $dau = implode(',', array_fill(0, count($mon), '?'));
     $w[] = '(v.customer_id IN (' . implode(',', $ids) . ')'
-         . ($mon ? ' OR EXISTS (SELECT 1 FROM visit_items i WHERE i.visit_id = v.id AND i.name IN ('
-                   . implode(',', array_fill(0, count($mon), '?')) . '))' : '') . ')';
-    array_push($a, ...$mon);
+         . ($mon ? " OR EXISTS (SELECT 1 FROM visit_items i WHERE i.visit_id = v.id AND (i.name IN ($dau) OR i.detail IN ($dau)))" : '') . ')';
+    array_push($a, ...$mon, ...$mon);
   }
   $bid = (string)inp('barber', '');
   if ($bid === 'none') $w[] = 'v.barber_id IS NULL';
   elseif ((int)$bid > 0) { $w[] = 'v.barber_id = ?'; $a[] = (int)$bid; }
   $only = (string)inp('only', '');
-  $loc = ['mdisc' => 'v.mdisc > 0', 'disc' => 'v.discount > 0', 'tip' => 'v.tip > 0',
+  $loc = ['report' => "EXISTS (SELECT 1 FROM bill_reports r WHERE r.visit_id = v.id AND r.status = 'open')", 'mdisc' => 'v.mdisc > 0', 'disc' => 'v.discount > 0', 'tip' => 'v.tip > 0',
           'void' => 'v.void_at IS NOT NULL', 'walkin' => 'v.customer_id IS NULL'];
   if (isset($loc[$only])) $w[] = $loc[$only];
   $tra = ['cash' => 'v.pay_cash > 0 AND v.pay_transfer = 0', 'transfer' => 'v.pay_transfer > 0 AND v.pay_cash = 0',
@@ -763,7 +839,18 @@ case 'bills': {
   $ngay = [];
   foreach ($st->fetchAll() as $r) $ngay[$r['d']] = ['n' => (int)$r['n'], 'amount' => (int)$r['amount']];
 
+  /* Báo sai đang chờ (mọi ngày) — hiện đầu màn Hoá đơn cho chủ xử lý. */
+  $st = db()->query("SELECT r.*, u.name AS by_name, NULL AS res_name FROM bill_reports r LEFT JOIN users u ON u.id = r.created_by
+                      WHERE r.status = 'open' ORDER BY r.report_date DESC, r.id DESC LIMIT 100");
+  $mo = array_map('mhReportRow', $st->fetchAll());
+  $hd = [];
+  $ids = array_values(array_filter(array_column($mo, 'visit_id')));
+  if ($ids) foreach (mhVisitList('v.id IN (' . implode(',', array_map('intval', $ids)) . ')', [], 100) as $v) $hd[$v['id']] = $v + ['can_void' => $v['void_at'] === null];
+  foreach ($mo as &$r) $r['bill'] = $r['visit_id'] ? ($hd[$r['visit_id']] ?? null) : null;
+  unset($r);
+
   out(['ok' => true, 'from' => $from, 'to' => $to, 'rows' => $rows, 'more' => $more, 'totals' => $tong, 'days' => $ngay,
+       'reports_open' => $mo,
        'barbers' => array_map(function ($b) { return ['id' => $b['id'], 'name' => $b['name'], 'active' => $b['active']]; }, mhBarbers())]);
 }
 
@@ -772,10 +859,8 @@ case 'day': {
   $owner = mhIsOwner($u);
   $date = ($owner && validDate(inp('date'))) ? inp('date') : mhToday();
   $visits = mhVisitList('v.visit_date = ?', [$date], 500);
-  $han = time() - MH_UNDO_MINUTES * 60;
   foreach ($visits as &$v) {
-    $v['can_void'] = $v['void_at'] === null && ($owner
-      || ($v['source'] === 'counter' && $v['created_by'] === $u['id'] && $v['created_at'] >= $han));
+    $v['can_void'] = $owner && $v['void_at'] === null;
     $v['customer_phone'] = $owner ? $v['customer_phone'] : mhMask((string)$v['customer_phone']);
   }
   unset($v);
@@ -793,7 +878,7 @@ case 'day': {
   $st->execute([$date]);
   $moves = array_map(function ($m) use ($u, $owner) {
     return ['id' => (int)$m['id'], 'amount' => (int)$m['amount'], 'note' => $m['note'], 'by' => $m['by_name'],
-            'time' => date('H:i', (int)$m['created_at']), 'can_del' => $owner || $m['move_date'] === mhToday()];
+            'time' => date('H:i', (int)$m['created_at']), 'can_del' => $owner];
   }, $st->fetchAll());
   $st = db()->prepare('SELECT s.*, u.name AS by_name FROM shift_close s LEFT JOIN users u ON u.id = s.closed_by WHERE close_date = ?');
   $st->execute([$date]);
@@ -803,7 +888,13 @@ case 'day': {
   $st = db()->prepare('SELECT keep, close_date FROM shift_close WHERE close_date < ? ORDER BY close_date DESC LIMIT 1');
   $st->execute([$date]);
   $truoc = $st->fetch() ?: null;
+  /* Báo thiếu hoá đơn trong ngày (báo sai từng hoá đơn đã đính kèm hoá đơn). */
+  $st = db()->prepare('SELECT r.*, u.name AS by_name, ru.name AS res_name FROM bill_reports r
+                         LEFT JOIN users u ON u.id = r.created_by LEFT JOIN users ru ON ru.id = r.resolved_by
+                        WHERE r.visit_id IS NULL AND r.report_date = ? ORDER BY r.id');
+  $st->execute([$date]);
   out(['ok' => true, 'date' => $date, 'visits' => $visits, 'gifts' => $gifts, 'moves' => $moves, 'close' => $close,
+       'missing_reports' => array_map('mhReportRow', $st->fetchAll()),
        'prev_keep' => $truoc ? (int)$truoc['keep'] : null, 'prev_date' => $truoc ? $truoc['close_date'] : null,
        'shift' => mhShiftCalc($date, $close ? (int)$close['opening'] : ($truoc ? (int)$truoc['keep'] : 0)),
        'shop' => MH_SHOP_NAME, 'tip_monthly' => mhTipMonthly()]);
@@ -1119,6 +1210,12 @@ case 'import': {
                                discount = CASE WHEN subtotal = 0 THEN ? ELSE discount END
                              WHERE kv_invoice = ? AND source = \'import\' AND pay_cash + pay_transfer = 0 AND tip = 0');
   $n['pay_filled'] = 0;
+  /* Từ ngày quán bắt đầu bán bằng app, hoá đơn khách lẻ của KiotViet (không
+     số điện thoại, không khớp được với ai) mà nhập vào là trùng với hoá đơn
+     khách lẻ quầy đã lập trên app — bỏ qua, không thì doanh thu và tiền tủ
+     bị cộng hai lần. */
+  $banApp = $pdo->query("SELECT MIN(visit_date) FROM visits WHERE source IN ('counter','owner') AND pay_cash + pay_transfer > 0")->fetchColumn() ?: null;
+  $n['walkin_skipped'] = 0;
 
   foreach ($inv as $h) {
     $code  = trim((string)($h['c'] ?? ''));
@@ -1152,6 +1249,7 @@ case 'import': {
       continue;
     }
 
+    if ($khachLe && $banApp !== null && $date >= $banApp) { $n['walkin_skipped']++; continue; }
     if ($khachLe) {
       /* Khách lẻ: không đụng gì tới hạng hay đối soát, chỉ thêm doanh thu. */
       $n['walkin']++;
@@ -1383,12 +1481,10 @@ case 'cash_move_add': {
 }
 
 case 'cash_move_del': {
-  $u = mhRequireUser();
+  $u = mhRequireOwner();
   $st = db()->prepare('SELECT * FROM cash_moves WHERE id = ?'); $st->execute([(int)inp('id', 0)]);
   $m = $st->fetch();
   if (!$m || $m['void_at'] !== null) out(['ok' => false, 'error' => 'Không tìm thấy.'], 404);
-  if (!mhIsOwner($u) && $m['move_date'] !== mhToday())
-    out(['ok' => false, 'error' => 'Chỉ sửa được khoản của hôm nay.'], 403);
   db()->prepare('UPDATE cash_moves SET void_at = ?, void_by = ? WHERE id = ?')->execute([time(), $u['id'], $m['id']]);
   mhAudit($u['id'], 'cash_move_del', $m['move_date'] . ' · ' . $m['note'] . ' · ' . $m['amount']);
   out(['ok' => true]);
@@ -1403,6 +1499,10 @@ case 'shift_close': {
   $counted = max(0, (int)inp('counted', 0));
   $keep = max(0, (int)inp('keep', 0));
   if ($keep > $counted) out(['ok' => false, 'error' => 'Tiền để lại tủ không thể nhiều hơn tiền đếm được.'], 400);
+  if (!mhIsOwner($u)) {
+    $st = db()->prepare('SELECT 1 FROM shift_close WHERE close_date = ?'); $st->execute([$date]);
+    if ($st->fetchColumn()) out(['ok' => false, 'error' => 'Ca hôm nay đã chốt rồi — muốn chốt lại thì nhờ chủ quán.'], 409);
+  }
   $c = mhShiftCalc($date, $opening);
   $diff = $counted - $c['expected'];
   $note = mb_substr(trim((string)inp('note', '')), 0, 300);
@@ -1454,13 +1554,14 @@ case 'setting_save': {
 
 case 'users': {
   mhRequireOwner();
-  $rows = db()->query("SELECT u.id, u.name, u.username, u.role, u.active, u.created_at,
+  $rows = db()->query("SELECT u.id, u.name, u.username, u.role, u.active, u.created_at, u.barber_id,
                               (SELECT MAX(last_seen) FROM sessions s WHERE s.user_id = u.id) AS last_seen
                          FROM users u ORDER BY u.role DESC, u.name")->fetchAll();
   foreach ($rows as &$r) { $r['id'] = (int)$r['id']; $r['active'] = (int)$r['active'];
+                           $r['barber_id'] = $r['barber_id'] !== null ? (int)$r['barber_id'] : null;
                            $r['last_seen'] = $r['last_seen'] ? (int)$r['last_seen'] : null; }
   unset($r);
-  out(['ok' => true, 'rows' => $rows]);
+  out(['ok' => true, 'rows' => $rows, 'barbers' => mhBarbers()]);
 }
 
 case 'user_save': {
@@ -1470,6 +1571,11 @@ case 'user_save': {
   $user = mb_strtolower(trim((string)inp('username', '')));
   $pass = mhPass((string)inp('password', ''));
   $active = inp('active', 1) ? 1 : 0;
+  /* Quầy hoặc thợ; tài khoản thợ phải gắn với một thợ trong danh sách. */
+  $role = inp('role') === 'barber' ? 'barber' : 'counter';
+  $bid = $role === 'barber' ? (int)inp('barber_id', 0) : 0;
+  if ($role === 'barber' && !in_array($bid, array_column(mhBarbers(), 'id'), true))
+    out(['ok' => false, 'error' => 'Chọn thợ cho tài khoản thợ.'], 400);
   if ($name === '') out(['ok' => false, 'error' => 'Đặt tên cho tài khoản.'], 400);
   if (!preg_match('/^[a-z0-9._-]{3,30}$/', $user))
     out(['ok' => false, 'error' => 'Tên đăng nhập 3–30 ký tự, chỉ chữ thường không dấu, số và . _ -'], 400);
@@ -1481,7 +1587,15 @@ case 'user_save': {
 
   if ($id) {
     if ($id === $u['id'] && !$active) out(['ok' => false, 'error' => 'Không tự tắt tài khoản chủ được.'], 400);
+    $st = db()->prepare('SELECT role, barber_id FROM users WHERE id = ?'); $st->execute([$id]);
+    $cu = $st->fetch();
+    if (!$cu) out(['ok' => false, 'error' => 'Không tìm thấy tài khoản.'], 404);
     db()->prepare('UPDATE users SET name = ?, username = ?, active = ? WHERE id = ?')->execute([$name, $user, $active, $id]);
+    if ($cu['role'] !== 'owner') {
+      db()->prepare('UPDATE users SET role = ?, barber_id = ? WHERE id = ?')->execute([$role, $bid ?: null, $id]);
+      /* Đổi quyền thì đăng nhập lại — phiên cũ đang mở màn của quyền cũ. */
+      if ($cu['role'] !== $role || (int)$cu['barber_id'] !== $bid) db()->prepare('DELETE FROM sessions WHERE user_id = ?')->execute([$id]);
+    }
     if ($pass !== '') {
       db()->prepare('UPDATE users SET pass_hash = ? WHERE id = ?')->execute([mhMakePass($pass), $id]);
       /* Đổi mật khẩu quầy thường là vì người cũ nghỉ — đá mọi máy đang
@@ -1492,11 +1606,11 @@ case 'user_save': {
     if (!$active) db()->prepare('DELETE FROM sessions WHERE user_id = ?')->execute([$id]);
   } else {
     if ($pass === '') out(['ok' => false, 'error' => 'Đặt mật khẩu cho tài khoản mới.'], 400);
-    db()->prepare("INSERT INTO users (name, username, pass_hash, role, active, created_at) VALUES (?,?,?,'counter',?,?)")
-        ->execute([$name, $user, mhMakePass($pass), $active, time()]);
+    db()->prepare('INSERT INTO users (name, username, pass_hash, role, barber_id, active, created_at) VALUES (?,?,?,?,?,?,?)')
+        ->execute([$name, $user, mhMakePass($pass), $role, $bid ?: null, $active, time()]);
     $id = (int)db()->lastInsertId();
   }
-  mhAudit($u['id'], 'user_save', "#$id $user" . ($pass !== '' ? ' · đặt mật khẩu' : ''));
+  mhAudit($u['id'], 'user_save', "#$id $user · $role" . ($bid ? " thợ #$bid" : '') . ($pass !== '' ? ' · đặt mật khẩu' : ''));
   out(['ok' => true, 'id' => $id]);
 }
 

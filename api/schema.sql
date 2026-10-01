@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS users (
   name        TEXT    NOT NULL,
   username    TEXT    NOT NULL UNIQUE,
   pass_hash   TEXT    NOT NULL,
-  role        TEXT    NOT NULL DEFAULT 'counter',
+  role        TEXT    NOT NULL DEFAULT 'counter', -- owner | counter | barber
+  barber_id   INTEGER,                              -- tài khoản thợ: thợ nào
   active      INTEGER NOT NULL DEFAULT 1,
   created_at  INTEGER NOT NULL
 );
@@ -145,6 +146,7 @@ CREATE TABLE IF NOT EXISTS visits (
   pay_transfer INTEGER NOT NULL DEFAULT 0,
   mdisc       INTEGER NOT NULL DEFAULT 0,    -- giảm thêm bằng tay (đ) — có ⚠ khi chốt ca
   mdisc_note  TEXT    NOT NULL DEFAULT '',   -- lý do giảm thêm, bắt buộc khi mdisc > 0
+  client_ref  TEXT,                          -- mã máy quầy sinh cho mỗi hoá đơn: gửi lại không tạo hai lần
   source      TEXT    NOT NULL DEFAULT 'counter',
   kv_invoice  TEXT,                          -- mã hoá đơn KiotViet đã khớp
   flags       TEXT    NOT NULL DEFAULT '',   -- NO_INVOICE: đối soát không thấy hoá đơn
@@ -175,7 +177,8 @@ CREATE TABLE IF NOT EXISTS visit_items (
   price       INTEGER NOT NULL DEFAULT 0,    -- thành tiền của dòng, đã trừ giảm giá
   list_price  INTEGER NOT NULL DEFAULT 0,    -- đơn giá niêm yết lúc bán
   disc        INTEGER NOT NULL DEFAULT 0,    -- giảm giá của dòng (gồm cả giảm tay)
-  mdisc       INTEGER NOT NULL DEFAULT 0     -- phần giảm thêm bằng tay của dòng
+  mdisc       INTEGER NOT NULL DEFAULT 0,    -- phần giảm thêm bằng tay của dòng
+  detail      TEXT    NOT NULL DEFAULT ''    -- tên sản phẩm cụ thể (Wax Reuzel…)
 );
 CREATE INDEX IF NOT EXISTS idx_item_visit ON visit_items(visit_id);
 CREATE INDEX IF NOT EXISTS idx_item_kind  ON visit_items(kind, visit_id);
@@ -343,3 +346,21 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT
 );
+
+/* Quầy / thợ báo hoá đơn sai (nhầm thợ, nhầm món, giảm bậy…) hoặc báo
+   thiếu hoá đơn (visit_id NULL). Quầy và thợ không tự sửa được hoá đơn —
+   chỉ báo, chủ quán sửa rồi đánh dấu đã xử lý. */
+CREATE TABLE IF NOT EXISTS bill_reports (
+  id          INTEGER PRIMARY KEY,
+  visit_id    INTEGER REFERENCES visits(id) ON DELETE CASCADE,
+  report_date TEXT    NOT NULL,
+  note        TEXT    NOT NULL,
+  status      TEXT    NOT NULL DEFAULT 'open',   -- open | done
+  reply       TEXT    NOT NULL DEFAULT '',
+  created_at  INTEGER NOT NULL,
+  created_by  INTEGER,
+  resolved_at INTEGER,
+  resolved_by INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_report_visit  ON bill_reports(visit_id);
+CREATE INDEX IF NOT EXISTS idx_report_status ON bill_reports(status, report_date);

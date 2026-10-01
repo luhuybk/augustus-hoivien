@@ -472,3 +472,18 @@ button.tcard:hover{background:var(--bg3)}
   .bitems td,.bitems th{padding:5px 4px}
   .bitems td:first-child{white-space:normal}
 }
+
+/* ---------------- tên sản phẩm, báo sai ---------------- */
+.inp.pdetail{margin:6px 0 2px;padding:7px 9px;font-size:13.5px}
+.pdname{font-size:12px;color:var(--tx2)}
+.reps{margin:8px 0 0;display:flex;flex-direction:column;gap:6px}
+.rep{padding:8px 10px;border-radius:9px;background:rgba(255,107,107,.08);border:1px solid rgba(255,107,107,.3);font-size:13.5px}
+.rep.done{background:var(--bg3);border-color:var(--line)}
+.rep .ok{color:var(--ok);margin-top:3px}
+.rep form{gap:6px;margin-top:6px}
+.rep form .inp{flex:1;padding:6px 8px}
+.chip.warnchip{border-color:var(--warn);color:var(--warn)}
+.repForm{margin-top:10px}
+.repForm textarea{resize:vertical}
+details.card>summary{cursor:pointer;list-style:none}
+details.card>summary::-webkit-details-marker{display:none}

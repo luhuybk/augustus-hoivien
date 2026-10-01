@@ -14,6 +14,8 @@ const tienGon = n => {
 };
 /* 1000000 → "1.000.000" cho ô nhập tiền; 0 thì để trống cho hiện chữ gợi ý. */
 const soTien = n => Number(n) ? Number(n).toLocaleString('vi-VN') : '';
+/* Tên món kèm tên sản phẩm cụ thể: "Sản phẩm A – 12% · Wax Reuzel". */
+const tenMon = i => i.name + (i.detail ? ' · ' + i.detail : '');
 const ngay = d => d ? d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4) : '';
 const ngayNgan = d => d ? d.slice(8, 10) + '/' + d.slice(5, 7) : '';
 
@@ -254,7 +256,7 @@ const Views = {
         <h3>Hoá đơn ${owner ? '' : 'gần đây'}</h3>
         ${d.visits.length ? `<div class="list">${d.visits.map(v => this.visitRow(v, false)).join('')}</div>`
                           : '<div class="dim">Chưa có lượt nào.</div>'}
-        ${owner ? '' : `<p class="dim" style="margin:8px 0 0">Tính tiền nhầm thì huỷ hoá đơn được trong ${App.undoMinutes} phút. Quá thời gian thì nhờ chủ quán.</p>`}
+        ${owner ? '' : `<p class="dim" style="margin:8px 0 0">Tính tiền nhầm thì mở hoá đơn ở mục Báo cáo, bấm <b>📣 Báo sai</b> — chủ quán sẽ sửa.</p>`}
       </div>
 
       ${owner ? this.cardOwner(d) : ''}
@@ -305,7 +307,7 @@ const Views = {
           ? `<button class="link" data-act="open" data-id="${v.customer_id}" style="padding:0">${esc(v.customer_name || '(chưa tên)')}</button>
              <span class="dim num"> ${esc(v.customer_phone || '')}</span><br>`
           : '<span class="dim">Khách lẻ</span><br>') : ''}
-        <b>${esc(v.items.map(i => i.name + (i.qty > 1 ? ' ×' + i.qty : '')).join(', ') || '—')}</b>
+        <b>${esc(v.items.map(i => tenMon(i) + (i.qty > 1 ? ' ×' + i.qty : '')).join(', ') || '—')}</b>
         <div class="sub num">${showCustomer ? '' : ngay(v.visit_date) + ' '}${esc(v.visit_time)} · <b>${tien(v.amount)}</b>
           ${v.discount ? ` <span class="dim">(giảm ${tienGon(v.discount)}${v.disc_note ? ' · ' + esc(v.disc_note) : ''})</span>` : ''}
           ${v.tip ? ' · tip ' + tienGon(v.tip) : ''}${tra ? ' · ' + tra : ''}
@@ -410,8 +412,13 @@ const Views = {
       const s = sv.find(x => x.id === l.sid);
       if (!s) return '';
       const r = q.lines[i] || {};
+      const sp = s.kind === 'product';
+      const dsTen = ((data.product_names || {})[s.id] || []);
       return `<div class="pline${l.mdOpen ? ' md' : ''}">
         <div class="grow"><b>${esc(s.name)}</b>
+          ${sp ? `<input class="inp pdetail" id="posDt${i}" data-pdetail="${i}" list="pn${s.id}" autocomplete="off"
+                   placeholder="Tên sản phẩm (bắt buộc) — vd. Wax Reuzel" value="${esc(l.detail || '')}">
+                 <datalist id="pn${s.id}">${dsTen.map(x => `<option value="${esc(x.name)}">${x.price ? tien(x.price) : ''}</option>`).join('')}</datalist>` : ''}
           <div class="sub num">${s.price ? tien(s.price) : `<input class="inp pprice" data-pprice="${i}" data-money inputmode="numeric" placeholder="Nhập giá" value="${soTien(l.price)}">`}
             <span id="pdisc${i}" style="color:var(--${l.mdOpen ? 'warn' : 'ok'})">${r.disc ? ' · −' + tienGon(r.disc) : ''}</span>
             ${l.mdOpen ? '' : `<button class="link mdbtn" data-act="posMd" data-i="${i}">+ giảm thêm</button>`}</div>
@@ -495,6 +502,7 @@ const Views = {
     const sv = data.services || [];
     for (const l of st.lines){
       const s = sv.find(x => x.id === l.sid);
+      if (s && s.kind === 'product' && !String(l.detail || '').trim()) return 'Ghi tên sản phẩm cho dòng ' + s.name + '.';
       if (s && !s.price && !(l.price >= 1000)) return 'Nhập giá cho ' + s.name + '.';
     }
     if (q.mdisc > 0 && String(st.mdReason || '').trim().length < 3) return 'Ghi lý do giảm thêm.';
@@ -550,7 +558,7 @@ const Views = {
 
   /* Hoá đơn in khổ 80mm (máy in nhiệt) — vừa cả khổ A5 nếu in giấy thường. */
   receipt(v, shop){
-    const dong = v.items.map(i => `<tr><td>${esc(i.name)}${i.qty > 1 ? ' ×' + i.qty : ''}
+    const dong = v.items.map(i => `<tr><td>${esc(tenMon(i))}${i.qty > 1 ? ' ×' + i.qty : ''}
         ${i.disc ? `<div class="s">${tien(i.list_price)} − ${tien(i.disc)}</div>` : ''}</td>
       <td class="r">${tien(i.price)}</td></tr>`).join('');
     return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(v.code)}</title><style>
@@ -600,8 +608,8 @@ const Views = {
     });
     const dv = new Map();
     con.forEach(v => v.items.forEach(i => {
-      const t = dv.get(i.name) || {n: 0, dt: 0};
-      t.n += i.qty; t.dt += i.price; dv.set(i.name, t);
+      const t = dv.get(tenMon(i)) || {n: 0, dt: 0};
+      t.n += i.qty; t.dt += i.price; dv.set(tenMon(i), t);
     }));
     const homNay = d.date === App.today;
     const giamTay = con.filter(v => v.mdisc > 0);
@@ -634,8 +642,13 @@ const Views = {
       ${d.gifts.length ? `<div class="card"><h3>Quà đã trao (${d.gifts.length})</h3><div class="list">${d.gifts.map(g => `
         <button class="item" data-act="open" data-id="${g.customer_id}"><div class="grow"><b>${esc(g.gift)}</b>
           <div class="sub">${esc(g.name)} · ${g.time}${g.by ? ' · ' + esc(g.by) : ''}</div></div></button>`).join('')}</div></div>` : ''}
+      ${d.missing_reports && d.missing_reports.length ? `<div class="card mdwarn"><h3>📣 Báo thiếu hoá đơn (${d.missing_reports.length})</h3>
+        ${this.reportList(d.missing_reports)}</div>` : ''}
       <div class="card"><h3>Hoá đơn (${con.length}${d.visits.length > con.length ? ' · ' + (d.visits.length - con.length) + ' đã huỷ' : ''})</h3>
         ${d.visits.length ? this.billList(d.visits) : '<div class="dim">Chưa có hoá đơn nào.</div>'}
+        ${owner ? '' : `<p class="dim" style="margin:10px 0 0">Hoá đơn sai: bấm vào hoá đơn → <b>📣 Báo sai</b>. Quầy không tự huỷ hay sửa được.
+          <button class="link" data-act="repOpen" data-k="miss" data-date="${esc(d.date)}" style="padding:0 4px">Báo thiếu hoá đơn</button></p>
+          <div id="repmiss"></div>`}
       </div>
     </div>`;
   },
@@ -646,7 +659,7 @@ const Views = {
     return `<div class="card mdwarn"><h3>⚠ ${ds.length} hoá đơn giảm thêm tay · −${tien(ds.reduce((a, v) => a + v.mdisc, 0))}</h3>
       <div class="list">${ds.map(v => `<div class="item"><div class="grow">
         <b>${esc(v.visit_time || '')} · ${esc(v.customer_name || 'Khách lẻ')}</b> <span class="dim num">${esc(v.code)}</span>
-        <div class="sub">${v.items.filter(i => i.mdisc).map(i => `${esc(i.name)}: <s class="dim">${tien(i.list_price * i.qty)}</s> → <b>${tien(i.price)}</b>`).join(' · ')}</div>
+        <div class="sub">${v.items.filter(i => i.mdisc).map(i => `${esc(tenMon(i))}: <s class="dim">${tien(i.list_price * i.qty)}</s> → <b>${tien(i.price)}</b>`).join(' · ')}</div>
         <div class="sub">Lý do: <b>${esc(v.mdisc_note || '—')}</b>${v.by_name ? ' · lập bởi ' + esc(v.by_name) : ''}${v.barber_name ? ' · ✂︎ ' + esc(v.barber_name) : ''}</div>
       </div><b class="num" style="color:var(--warn)">−${tien(v.mdisc)}</b></div>`).join('')}</div>
       <p class="dim" style="margin:8px 0 0">Món giảm thêm không theo hạng hay khuyến mãi — quầy tự gõ số tiền giảm và lý do.</p></div>`;
@@ -665,7 +678,7 @@ const Views = {
     return `<details class="brow${huy ? ' void' : ''}${v.mdisc && !huy ? ' md' : ''}"><summary>
       <span class="bt num">${esc(v.visit_time || '—')}</span>
       <span class="bk">${v.customer_id ? esc(v.customer_name || '(chưa tên)') : '<i class="dim">Khách lẻ</i>'}
-        ${huy ? '<span class="badge bad">huỷ</span>' : ''}${v.mdisc && !huy ? '<span class="badge warn">⚠ giảm tay</span>' : ''}</span>
+        ${huy ? '<span class="badge bad">huỷ</span>' : ''}${v.mdisc && !huy ? '<span class="badge warn">⚠ giảm tay</span>' : ''}${(v.reports || []).some(r => r.status === 'open') ? '<span class="badge bad">📣 báo sai</span>' : ''}</span>
       <span class="bp num dim">${esc(v.customer_phone || '')}</span>
       <span class="ba num"><b>${tien(v.amount)}</b> <small title="${v.pay_cash && v.pay_transfer ? 'Tiền mặt + chuyển khoản' : v.pay_cash ? 'Tiền mặt' : 'Chuyển khoản'}">${tra}</small></span>
       <span class="bb">${v.barber_name ? '✂︎ ' + esc(v.barber_name) : '<span class="dim">—</span>'}</span>
@@ -674,7 +687,7 @@ const Views = {
 
   billDetail(v){
     const huy = v.void_at != null;
-    const dong = v.items.map(i => `<tr${i.mdisc ? ' class="md"' : ''}><td>${esc(i.name)}</td><td class="r num">${i.qty}</td>
+    const dong = v.items.map(i => `<tr${i.mdisc ? ' class="md"' : ''}><td>${esc(i.name)}${i.detail ? `<div class="pdname">${esc(i.detail)}</div>` : ''}</td><td class="r num">${i.qty}</td>
       <td class="r num">${i.list_price ? tien(i.list_price) : ''}</td>
       <td class="r num">${i.disc ? (i.mdisc ? '⚠ ' : '') + '−' + tien(i.disc) : ''}</td><td class="r num"><b>${tien(i.price)}</b></td></tr>`).join('');
     const giamKhac = v.discount - (v.mdisc || 0);
@@ -695,15 +708,108 @@ const Views = {
         ${v.by_name && v.source !== 'import' ? ' · lập bởi ' + esc(v.by_name) : ''}${v.source === 'import' ? ' · nhập từ KiotViet' : ''}</div>
       ${v.note ? `<div class="sub">📝 ${esc(v.note)}</div>` : ''}
       ${huy ? `<div class="sub" style="color:var(--bad)">Đã huỷ${v.void_by_name ? ' bởi ' + esc(v.void_by_name) : ''}: ${esc(v.void_reason || '')}</div>` : ''}
+      ${this.reportList(v.reports || [])}
       <div class="row bact">
-        ${!huy && v.pay_cash + v.pay_transfer > 0 ? `<button class="chip" data-act="printBill" data-id="${v.id}">🖨 In</button>` : ''}
-        ${v.customer_id ? `<button class="chip" data-act="open" data-id="${v.customer_id}">Thẻ khách</button>` : ''}
+        ${!huy && v.pay_cash + v.pay_transfer > 0 && !API.isBarber() ? `<button class="chip" data-act="printBill" data-id="${v.id}">🖨 In</button>` : ''}
+        ${v.customer_id && !API.isBarber() ? `<button class="chip" data-act="open" data-id="${v.customer_id}">Thẻ khách</button>` : ''}
+        ${!API.isOwner() && !huy ? `<button class="chip warnchip" data-act="repOpen" data-id="${v.id}" data-k="${v.id}">📣 ${API.isBarber() && !v.barber_id ? 'Đây là hoá đơn của tôi' : 'Báo sai'}</button>` : ''}
         ${v.can_void && (App.barbers || []).length ? `<select class="vbsel" data-vb="${v.id}" title="Đổi thợ">
           <option value="0">— thợ —</option>
           ${App.barbers.map(b => `<option value="${b.id}"${b.id === v.barber_id ? ' selected' : ''}>${esc(b.name)}</option>`).join('')}
         </select>` : ''}
         ${v.can_void ? `<button class="link bad" data-act="void" data-id="${v.id}">Huỷ hoá đơn</button>` : ''}
-      </div></div>`;
+      </div><div id="rep${v.id}"></div></div>`;
+  },
+
+  /* Ô báo sai / báo thiếu — quầy và thợ gửi, chủ quán xử lý. */
+  reportForm(vid, date){
+    const thoNhan = API.isBarber() && vid && !((App.findBill(vid) || {}).barber_id);
+    return `<form class="repForm" data-vid="${vid}" data-date="${esc(date)}">
+      ${vid ? '' : `<label class="dim">Ngày</label><input type="date" class="inp" name="date" value="${esc(date || App.today)}" max="${esc(App.today)}" style="width:auto;margin-bottom:6px">`}
+      <textarea class="inp" name="note" rows="2" placeholder="${vid ? 'Sai ở đâu? vd: không phải em cắt, thiếu ráy tai, nhầm giá…' : 'Thiếu hoá đơn nào? vd: 14h cắt + ráy tai cho anh Nam, chưa xuất'}">${thoNhan ? 'Hoá đơn này em cắt' : ''}</textarea>
+      <button class="btn sm pri" type="submit" style="margin-top:6px">Gửi cho chủ quán</button></form>`;
+  },
+
+  reportList(ds){
+    if (!ds.length) return '';
+    const owner = API.isOwner();
+    return `<div class="reps">${ds.map(r => `<div class="rep ${r.status}">
+      <div>📣 <b>${esc(r.by || '')}</b> <span class="dim">${new Date(r.at * 1000).toLocaleString('vi-VN', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'})}</span>: ${esc(r.note)}</div>
+      ${r.status === 'done'
+        ? `<div class="ok">✓ Chủ đã xử lý${r.reply ? ': ' + esc(r.reply) : ''}${owner ? ` <button class="link" data-act="repReopen" data-id="${r.id}" style="padding:0 4px">mở lại</button>` : ''}</div>`
+        : owner ? `<form class="resForm row" data-id="${r.id}"><input class="inp" name="reply" placeholder="Đã sửa gì? (không bắt buộc)">
+                    <button class="btn sm pri" type="submit">✓ Đã xử lý</button></form>`
+                : '<div class="dim">⏳ Chờ chủ quán xử lý</div>'}
+    </div>`).join('')}</div>`;
+  },
+
+  /* Báo sai chờ chủ xử lý — đầu màn Hoá đơn. */
+  reportsOpen(ds){
+    if (!ds || !ds.length) return '';
+    return `<div class="card mdwarn"><h3>📣 ${ds.length} báo sai chờ xử lý</h3>
+      ${ds.map(r => r.bill ? `<div class="dim" style="margin-top:8px">${ngay(r.bill.visit_date)}</div><div class="blist">${this.billRow(r.bill)}</div>`
+        : `<div class="dim" style="margin-top:8px">${ngay(r.date)} · báo thiếu hoá đơn</div>${this.reportList([r])}`).join('')}
+      <p class="dim" style="margin:8px 0 0">Bấm hoá đơn để xem chi tiết, sửa thợ / huỷ nếu cần, rồi bấm "Đã xử lý".</p></div>`;
+  },
+
+  /* Hoá đơn chia theo ngày, mỗi ngày một dòng tổng. tong: {ngày: {n, amount}}
+     (máy chủ cộng sẵn) — không có thì tự cộng từ danh sách. */
+  billDays(rows, tong){
+    const thu = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
+    if (!tong){
+      tong = {};
+      rows.filter(v => !v.void_at).forEach(v => { const t = tong[v.visit_date] || (tong[v.visit_date] = {n: 0, amount: 0}); t.n++; t.amount += v.amount; });
+    }
+    let ngayTruoc = '', html = '';
+    rows.forEach(v => {
+      if (v.visit_date !== ngayTruoc){
+        if (ngayTruoc) html += '</div>';
+        ngayTruoc = v.visit_date;
+        const n = tong[v.visit_date] || {n: 0, amount: 0};
+        html += `<div class="dayhead"><b>${thu[new Date(v.visit_date + 'T00:00:00').getDay()]} · ${ngay(v.visit_date)}</b>
+          <span class="num">${n.n} HĐ · ${tien(n.amount)}</span></div><div class="blist">
+          <div class="bhead"><span>Giờ</span><span>Khách</span><span>SĐT</span><span class="r">Tiền</span><span>Thợ</span></div>`;
+      }
+      html += this.billRow(v);
+    });
+    if (ngayTruoc) html += '</div>';
+    return html;
+  },
+
+  /* ---------------- tài khoản thợ ---------------- */
+  mine(d){
+    const con = d.rows.filter(v => !v.void_at);
+    const mon = new Map();
+    con.forEach(v => v.items.forEach(i => { const t = mon.get(i.name) || {n: 0, dt: 0}; t.n += i.qty; t.dt += i.price; mon.set(i.name, t); }));
+    const nay = App.today.slice(0, 7);
+    const truoc = (() => { const [y, m] = d.month.split('-').map(Number); return m === 1 ? (y - 1) + '-12' : y + '-' + String(m - 1).padStart(2, '0'); })();
+    const sau = (() => { const [y, m] = d.month.split('-').map(Number); return m === 12 ? (y + 1) + '-01' : y + '-' + String(m + 1).padStart(2, '0'); })();
+    return `<div class="wrap">
+      ${head('Hoá đơn của tôi', false, `<button class="chip" data-act="mineMonth" data-m="${truoc}">‹</button>
+        <input type="month" id="mineMonth" class="inp" style="width:auto;padding:8px" value="${esc(d.month)}" max="${esc(nay)}">
+        ${d.month < nay ? `<button class="chip" data-act="mineMonth" data-m="${sau}">›</button>` : ''}`)}
+      <p class="dim" style="margin-top:-6px">✂︎ ${esc(d.barber)} · tháng ${esc(d.month.slice(5))}/${esc(d.month.slice(0, 4))}.
+        Soát lại từng hoá đơn — thiếu hay sai thì bấm <b>📣 Báo sai</b> trong hoá đơn, hoặc báo thiếu ở cuối trang.</p>
+      <div class="stats">
+        <div class="stat"><div class="n">${con.length}</div><div class="l">hoá đơn</div></div>
+        <div class="stat"><div class="n">${con.reduce((a, v) => a + v.items.filter(i => i.kind === 'cut').reduce((b, i) => b + i.qty, 0), 0)}</div><div class="l">lượt cắt</div></div>
+        <div class="stat"><div class="n">${tienGon(con.reduce((a, v) => a + v.amount, 0))}</div><div class="l">doanh thu</div></div>
+        <div class="stat"><div class="n">${tienGon(con.reduce((a, v) => a + v.tip, 0))}</div><div class="l">tip đã nhận</div></div>
+      </div>
+      ${mon.size ? `<div class="card"><h3>Đếm theo món</h3><div class="tblwrap" style="border:0"><table class="tbl" style="font-size:13.5px">
+        <thead><tr><th>Món</th><th class="r">SL</th><th class="r">Thành tiền</th></tr></thead>
+        <tbody>${[...mon].sort((a, b) => b[1].n - a[1].n).map(([k, t]) => `<tr style="cursor:default"><td>${esc(k)}</td>
+          <td class="r num">${t.n}</td><td class="r num">${tien(t.dt)}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
+      <div class="card" style="padding-top:4px">${d.rows.length ? this.billDays(d.rows) : '<p class="dim">Tháng này chưa có hoá đơn nào ghi tên bạn.</p>'}</div>
+      ${d.unassigned.length ? `<details class="card"><summary><b>Hoá đơn chưa ghi thợ (${d.unassigned.length})</b>
+        <span class="dim"> — có hoá đơn của bạn thì mở ra, bấm "Đây là hoá đơn của tôi"</span></summary>
+        ${this.billDays(d.unassigned)}</details>` : ''}
+      <div class="card"><h3>📣 Báo thiếu hoá đơn</h3>
+        <p class="dim" style="margin-top:0">Cắt cho khách mà không thấy hoá đơn ở trên (quầy quên xuất)? Ghi lại để chủ quán kiểm tra.</p>
+        ${this.reportForm(0, App.today)}</div>
+      ${d.reports.length ? `<div class="card"><h3>Những lần đã báo (${d.reports.length})</h3>
+        ${d.reports.map(r => `<div class="dim" style="margin-top:6px">${ngay(r.date)}${r.visit_id ? ' · hoá đơn' : ' · thiếu hoá đơn'}</div>${this.reportList([r])}`).join('')}</div>` : ''}
+    </div>`;
   },
 
   /* ---------------- sổ hoá đơn ---------------- */
@@ -722,7 +828,7 @@ const Views = {
         </div>
         <div class="bfrow sel">
           ${chon('bBarber', [['', 'Mọi thợ'], ...d.barbers.map(b => [b.id, b.name + (b.active ? '' : ' (nghỉ)')]), ['none', 'Chưa ghi thợ']], st.barber)}
-          ${chon('bOnly', [['', 'Mọi hoá đơn'], ['mdisc', '⚠ Có giảm thêm tay'], ['disc', 'Có giảm giá'], ['tip', 'Có tip'], ['walkin', 'Khách lẻ'], ['void', 'Đã huỷ']], st.only)}
+          ${chon('bOnly', [['', 'Mọi hoá đơn'], ['report', '📣 Có báo sai chưa xử lý'], ['mdisc', '⚠ Có giảm thêm tay'], ['disc', 'Có giảm giá'], ['tip', 'Có tip'], ['walkin', 'Khách lẻ'], ['void', 'Đã huỷ']], st.only)}
           ${chon('bPay', [['', 'Mọi cách trả'], ['cash', '💵 Tiền mặt'], ['transfer', '🏦 Chuyển khoản'], ['mix', 'Cả hai']], st.pay)}
           ${chon('bSrc', [['', 'App + KiotViet'], ['app', 'Lập trên app'], ['import', 'Nhập từ KiotViet']], st.src)}
         </div>
@@ -732,21 +838,9 @@ const Views = {
   },
 
   billsBody(d){
-    const t = d.totals, thu = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
-    let ngayTruoc = '', html = '';
-    d.rows.forEach(v => {
-      if (v.visit_date !== ngayTruoc){
-        if (ngayTruoc) html += '</div>';
-        ngayTruoc = v.visit_date;
-        const n = d.days[v.visit_date] || {n: 0, amount: 0};
-        html += `<div class="dayhead"><b>${thu[new Date(v.visit_date + 'T00:00:00').getDay()]} · ${ngay(v.visit_date)}</b>
-          <span class="num">${n.n} HĐ · ${tien(n.amount)}</span></div><div class="blist">
-          <div class="bhead"><span>Giờ</span><span>Khách</span><span>SĐT</span><span class="r">Tiền</span><span>Thợ</span></div>`;
-      }
-      html += this.billRow(v);
-    });
-    if (ngayTruoc) html += '</div>';
-    return `<div class="stats">
+    const t = d.totals, html = this.billDays(d.rows, d.days);
+    return `${this.reportsOpen(d.reports_open)}
+      <div class="stats">
         <div class="stat"><div class="n">${tien(t.amount)}</div><div class="l">doanh thu · ${t.n} hoá đơn</div></div>
         <div class="stat cash"><div class="n">${tien(t.cash)}</div><div class="l">💵 tiền mặt (gồm tip)</div></div>
         <div class="stat"><div class="n">${tien(t.transfer)}</div><div class="l">🏦 chuyển khoản (gồm tip)</div></div>
@@ -842,8 +936,10 @@ const Views = {
         <button class="btn pri" data-act="shiftClose" style="width:auto;padding:13px 28px">🔒 Chốt ca</button>
         ${c ? '<button class="link" data-act="shiftCancel">Thôi, giữ biên bản cũ</button>' : ''}</div>
     </div>` : `<div class="mod wide ${c.diff === 0 ? 'ok' : 'lech'}"><div class="mh"><i>4</i>Đã chốt ca 🔒
-        <span class="grow"></span><button class="btn sm" data-act="shiftEdit">Chốt lại</button></div>
+        <span class="grow"></span>${API.isOwner() ? '<button class="btn sm" data-act="shiftEdit">Chốt lại</button>' : ''}</div>
       <div class="dim" style="margin:-6px 0 10px">${new Date(c.closed_at * 1000).toLocaleString('vi-VN')}${c.by_name ? ' · ' + esc(c.by_name) : ''}</div>
+      ${sh.expected !== c.expected ? `<div class="diffbox bad" style="margin-bottom:10px">⚠ Sổ đã thay đổi SAU khi chốt (thêm / huỷ hoá đơn, tip, ngoài luồng):
+        tủ giờ phải có <b>${tien(sh.expected)}</b>, lúc chốt là ${tien(c.expected)}. ${API.isOwner() ? 'Bấm "Chốt lại" để đếm lại.' : 'Báo chủ quán chốt lại.'}</div>` : ''}
       ${cong}
       <div class="grid3" style="margin-top:12px">
         <div><div class="dim">Đếm được trong tủ</div><div class="mv">${tien(c.counted)}</div></div>
@@ -1035,7 +1131,7 @@ const Views = {
     return `<div class="wrap">
       ${head(owner ? 'Thiết lập' : 'Khác')}
       <div class="card row"><div class="grow"><b>${esc(API.user ? API.user.name : '')}</b>
-        <div class="dim">${owner ? 'Chủ quán' : 'Tài khoản quầy'} · ${esc(App.shop || '')}</div></div></div>
+        <div class="dim">${owner ? 'Chủ quán' : API.isBarber() ? 'Tài khoản thợ' : 'Tài khoản quầy'} · ${esc(App.shop || '')}</div></div></div>
       ${owner ? `<div class="list" style="margin-bottom:12px">
         ${muc('go:services', '✂︎', 'Dịch vụ & giá', 'Giá bán, tiền công thợ, hoa hồng sản phẩm')}
         ${muc('go:tiers', '🏅', 'Hạng thành viên', 'Ngưỡng lên hạng, % giảm, quyền lợi')}
@@ -1043,7 +1139,7 @@ const Views = {
         ${muc('go:programs', '🎁', 'Quà theo mốc', 'Mốc quà theo số lần cắt, uốn…')}
         ${muc('go:import', '📥', 'Nhập & đối soát KiotViet', 'Nạp lịch sử, tìm lượt quầy quên ghi hoặc ghi khống')}
         ${muc('go:barbers', '💈', 'Thợ cắt', 'Danh sách thợ, lương cứng, khách quen')}
-        ${muc('go:users', '👤', 'Tài khoản quầy', 'Tạo, đổi mật khẩu, tắt')}
+        ${muc('go:users', '👤', 'Tài khoản quầy & thợ', 'Tạo, đổi mật khẩu, tắt; tài khoản thợ xem hoá đơn của mình')}
         ${muc('go:audit', '📜', 'Nhật ký', 'Ai đã ghi, huỷ, trao quà lúc nào')}
         ${muc('go:password', '🔑', 'Đổi mật khẩu chủ')}
       </div>` : ''}
@@ -1394,6 +1490,7 @@ const Views = {
         </div>
         <div class="dim">${s.walkin} hoá đơn khách lẻ (không số điện thoại) ${r.committed ? 'đã' : 'sẽ'} nhập thành hoá đơn không gắn khách —
           có trong sổ ngày và lương thợ, không vào hạng.</div>
+        ${s.walkin_skipped ? `<div class="dim">${s.walkin_skipped} hoá đơn khách lẻ rơi vào những ngày quán đã bán bằng app — bỏ qua để khỏi đếm hai lần.</div>` : ''}
         ${s.pay_filled ? `<div class="dim">${s.pay_filled} hoá đơn đã nhập từ trước ${r.committed ? 'đã' : 'sẽ'} được điền tiền mặt / chuyển khoản / tip.</div>` : ''}
         ${r.barbers_new && r.barbers_new.length ? `<p class="note" style="margin-top:10px">Thợ lấy từ cột “Người bán”, ${r.committed ? 'đã' : 'sẽ'} thêm vào danh sách thợ:
           <b>${r.barbers_new.map(esc).join(', ')}</b>. Đổi tên hiển thị ở Thiết lập → Thợ cắt.</p>` : ''}
@@ -1437,15 +1534,19 @@ const Views = {
 
   /* ---------------- tài khoản ---------------- */
 
-  users(rows){
+  users(rows, barbers){
+    const chonTho = (u) => `<select name="barber_id"><option value="0">— chọn thợ —</option>
+      ${(barbers || []).map(b => `<option value="${b.id}"${u.barber_id === b.id ? ' selected' : ''}>${esc(b.name)}${b.active ? '' : ' (nghỉ)'}</option>`).join('')}</select>`;
+    const chonVai = (u) => `<select name="role"><option value="counter"${u.role === 'barber' ? '' : ' selected'}>Quầy — tính tiền</option>
+      <option value="barber"${u.role === 'barber' ? ' selected' : ''}>Thợ — xem hoá đơn của mình</option></select>`;
     return `<div class="wrap">
       ${head('Tài khoản', true)}
-      <p class="note">Tài khoản quầy dùng chung: tính tiền, tra khách, trao quà, xem báo cáo hôm nay, huỷ hoá đơn vừa tạo trong
-        ${App.undoMinutes} phút. Không xem được số điện thoại đầy đủ, không đổi được giá, không xem lương.
-        Muốn biết ai ghi lượt nào thì tạo mỗi người một tài khoản.</p>
+      <p class="note"><b>Quầy</b>: tính tiền, tra khách, trao quà, xem báo cáo hôm nay, chốt ca. Không huỷ, không sửa được hoá đơn —
+        nhầm thì bấm 📣 Báo sai, chủ quán sửa. Không xem được số điện thoại đầy đủ, giá vốn, lương.<br>
+        <b>Thợ</b>: chỉ xem hoá đơn ghi tên mình theo tháng (đếm từng món), báo sai / báo thiếu hoá đơn. Không tính tiền, không tra khách.</p>
       ${rows.map(u => `<form class="erow" data-user="${u.id}">
         <div class="row"><b class="grow">${esc(u.name)}</b>
-          <span class="badge">${u.role === 'owner' ? 'chủ' : 'quầy'}</span>
+          <span class="badge">${u.role === 'owner' ? 'chủ' : u.role === 'barber' ? 'thợ' : 'quầy'}</span>
           ${u.active ? '' : '<span class="badge bad">đã tắt</span>'}</div>
         <div class="dim">${u.last_seen ? 'Dùng gần nhất ' + new Date(u.last_seen * 1000).toLocaleString('vi-VN') : 'Chưa đăng nhập'}</div>
         <div class="grid2">
@@ -1454,15 +1555,18 @@ const Views = {
           <div><label>Mật khẩu mới (để trống = giữ)</label><input name="password" autocapitalize="off" autocomplete="new-password"></div>
           <div><label>Trạng thái</label><select name="active"${u.role === 'owner' ? ' disabled' : ''}>
             <option value="1"${u.active ? ' selected' : ''}>Đang dùng</option><option value="0"${u.active ? '' : ' selected'}>Tắt</option></select></div>
+          ${u.role === 'owner' ? '' : `<div><label>Loại tài khoản</label>${chonVai(u)}</div><div><label>Thợ (nếu là tài khoản thợ)</label>${chonTho(u)}</div>`}
         </div>
         <button class="btn sm pri" type="submit" style="margin-top:10px">Lưu</button>
       </form>`).join('')}
       <form class="erow" data-user="0">
-        <b>Thêm tài khoản quầy</b>
+        <b>Thêm tài khoản</b>
         <div class="grid2">
-          <div><label>Tên hiển thị</label><input name="name" placeholder="vd. Quầy"></div>
-          <div><label>Tên đăng nhập</label><input name="username" placeholder="vd. quay" autocapitalize="off"></div>
+          <div><label>Tên hiển thị</label><input name="name" placeholder="vd. Phú"></div>
+          <div><label>Tên đăng nhập</label><input name="username" placeholder="vd. phu" autocapitalize="off"></div>
           <div><label>Mật khẩu</label><input name="password" autocapitalize="off" autocomplete="new-password"></div>
+          <div><label>Loại tài khoản</label>${chonVai({role: 'counter'})}</div>
+          <div><label>Thợ (nếu là tài khoản thợ)</label>${chonTho({})}</div>
         </div>
         <button class="btn sm pri" type="submit" style="margin-top:10px">Tạo</button>
       </form>
@@ -1476,7 +1580,8 @@ const Views = {
       reward_ungive: 'Hoàn quà', customer_create: 'Thêm khách', customer_update: 'Sửa khách',
       services_save: 'Sửa dịch vụ', tiers_save: 'Sửa hạng', program_save: 'Sửa chương trình',
       program_del: 'Xoá chương trình', program_off: 'Tắt chương trình', import: 'Nhập KiotViet',
-      user_save: 'Sửa tài khoản', change_password: 'Đổi mật khẩu'};
+      user_save: 'Sửa tài khoản', change_password: 'Đổi mật khẩu', report_add: '📣 Báo sai', report_resolve: 'Xử lý báo sai',
+      shift_close: 'Chốt ca', cash_move: 'Tiền ngoài luồng', cash_move_del: 'Xoá tiền ngoài luồng', visit_barber: 'Đổi thợ'};
     return `<div class="wrap">
       ${head('Nhật ký', true)}
       <div class="list">${rows.map(r => `<div class="item"><div class="grow">

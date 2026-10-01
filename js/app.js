@@ -29,6 +29,7 @@ const App = {
   posData: {},
   pos: null,              /* hoá đơn đang lập — giữ nguyên khi chuyển tab qua lại */
   pay: {open: 0},
+  mine: {month: ''},
   bills: {preset: 'today', from: '', to: '', q: '', barber: '', only: '', pay: '', src: '', limit: 200},
 
   get cur(){ return this.stack[this.stack.length - 1]; },
@@ -74,8 +75,10 @@ const App = {
       try{ this.applyMe(await API.call('me')); }
       catch(e){ /* hết phiên thì API.call đã dọn token; lỗi mạng thì vẫn thử vẽ */ }
     }
-    this.go(API.isOwner() ? 'dash' : 'pos');
+    this.go(this.homeTab());
   },
+
+  homeTab(){ return API.isOwner() ? 'dash' : API.isBarber() ? 'mine' : 'pos'; },
 
   applyMe(r){
     this.kinds = r.kinds; this.shop = r.shop; this.today = r.today; this.undoMinutes = r.undo_minutes;
@@ -85,6 +88,7 @@ const App = {
   /* ---------------- điều hướng ---------------- */
 
   tabs(){
+    if (API.isBarber()) return [['mine', '🧾', 'Hoá đơn của tôi'], ['more', '☰', 'Khác']];
     return API.isOwner()
       ? [['pos', '💳', 'Bán hàng'], ['customers', '👥', 'Khách'], ['day', '📋', 'Sổ ngày'], ['bills', '🧾', 'Hoá đơn'],
          ['dash', '📊', 'Tổng quan'], ['payroll', '💰', 'Lương'], ['more', '⚙︎', 'Thiết lập']]
@@ -157,6 +161,12 @@ const App = {
         view.innerHTML = Views.bills(this.bills, this.data.bills);
         break;
       }
+      case 'mine': {
+        this.data.mine = await API.call('my_bills', this.mine.month ? {month: this.mine.month} : {});
+        this.mine.month = this.data.mine.month;
+        view.innerHTML = Views.mine(this.data.mine);
+        break;
+      }
       case 'promos':
         view.innerHTML = Views.promos((await API.call('promos')).rows);
         break;
@@ -187,7 +197,7 @@ const App = {
         break;
       case 'more': {
         let ts = null;
-        if (!API.isOwner()) try{ ts = (await API.call('tiers')).rows; }catch(e){}
+        if (!API.isOwner() && !API.isBarber()) try{ ts = (await API.call('tiers')).rows; }catch(e){}
         view.innerHTML = Views.more(ts);
         break;
       }
@@ -227,7 +237,11 @@ const App = {
         view.innerHTML = Views.barbers(this.data.barberEdit);
         break;
       }
-      case 'users':     view.innerHTML = Views.users((await API.call('users')).rows); break;
+      case 'users': {
+        const r = await API.call('users');
+        view.innerHTML = Views.users(r.rows, r.barbers);
+        break;
+      }
       case 'audit':     view.innerHTML = Views.audit((await API.call('audit')).rows); break;
       case 'password':  view.innerHTML = Views.password(); break;
       default:          this.stack = [{name: 'lookup'}]; return this._render();
@@ -270,7 +284,10 @@ const App = {
   posReset(){
     this.pos = {cus: null, q: '', rows: null, err: '', newCus: false, newPhone: '',
                 barber: null, lines: [], promo: 0, tip: '', mdReason: '', pay: '', given: '', cashPart: '',
-                note: '', date: this.today, done: null};
+                note: '', date: this.today, done: null,
+                /* Mã riêng của hoá đơn đang lập — mất mạng giữa chừng bấm lại
+                   thì máy chủ trả hoá đơn cũ, không tạo hai lần. */
+                ref: Date.now().toString(36) + Math.random().toString(36).slice(2, 10)};
   },
 
   /* Cùng công thức với mhQuote (api/lib.php) — đây chỉ để hiện trước;
@@ -400,13 +417,21 @@ const App = {
     const tong = q.total + st.tipN;
     const cash = st.pay === 'cash' ? tong : st.pay === 'mix' ? st.cashPartN : 0;
     el.disabled = true;
-    const r = await API.call('bill_create', {
+    let r;
+    try{ r = await API.call('bill_create', {
       customer_id: st.cus && !st.cus.walkin ? st.cus.id : 0,
       barber_id: st.barber || 0,
-      items: st.lines.map((l, i) => ({service_id: l.sid, qty: l.qty, price: Number(l.price) || undefined, mdisc: q.lines[i].mdisc})),
+      items: st.lines.map((l, i) => ({service_id: l.sid, qty: l.qty, price: Number(l.price) || undefined, mdisc: q.lines[i].mdisc,
+                                      detail: (l.detail || '').trim()})),
       promo_id: st.promo || 0, mdisc_reason: st.mdReason,
       tip: st.tipN, pay_cash: cash, pay_transfer: tong - cash, note: st.note,
-      expect_total: q.total, date: API.isOwner() ? st.date : undefined});
+      expect_total: q.total, date: API.isOwner() ? st.date : undefined, client_ref: st.ref});
+    }catch(err){
+      /* Giá / hạng / khuyến mãi vừa đổi ở máy khác: tải lại rồi vẽ lại để
+         quầy thấy số mới, bấm thanh toán lần nữa. */
+      if (err.code === 'price_changed'){ this.posData = await API.call('pos_init'); this.drawPos(); }
+      throw err;
+    }
     st.done = r;
     st.change = st.pay === 'cash' && st.givenN > tong ? st.givenN - tong : 0;
     if (r.new_rewards && r.new_rewards.length) toast('🎁 Khách vừa đạt quà: ' + r.new_rewards.map(x => x.gift).join(', '), 'ok');
@@ -464,6 +489,8 @@ const App = {
 
   findBill(id){
     const ds = [].concat(this.pos && this.pos.done ? [this.pos.done.bill] : [], (this.data.bills || {}).rows || [],
+                         ((this.data.bills || {}).reports_open || []).map(r => r.bill).filter(Boolean),
+                         (this.data.mine || {}).rows || [], (this.data.mine || {}).unassigned || [],
                          (this.data.day || {}).visits || [], (this.data.card || {}).visits || []);
     return ds.find(v => v.id === id);
   },
@@ -647,9 +674,26 @@ const App = {
           if (l && s && s.price) l.qty++;
           else this.pos.lines.push({sid: id, qty: 1, price: 0});
           this.drawPos();
-          if (s && !s.price){ const ps = document.querySelectorAll('[data-pprice]'); if (ps.length) ps[ps.length - 1].focus(); }
+          /* Sản phẩm: gõ tên trước (chọn tên cũ là giá tự điền), rồi tới giá. */
+          const o = s && s.kind === 'product' ? document.querySelectorAll('[data-pdetail]')
+                  : s && !s.price ? document.querySelectorAll('[data-pprice]') : [];
+          if (o.length) o[o.length - 1].focus();
           return;
         }
+        /* Báo sai: mở ô ghi chú ngay trong chi tiết hoá đơn. */
+        case 'repOpen': {
+          const box = document.getElementById('rep' + el.dataset.k);
+          if (box) box.innerHTML = Views.reportForm(id || 0, el.dataset.date || '');
+          const ta = box && box.querySelector('textarea');
+          if (ta) ta.focus();
+          return;
+        }
+        case 'repReopen':
+          await API.call('report_resolve', {id, reopen: 1});
+          return this.render();
+        case 'mineMonth':
+          this.mine.month = el.dataset.m;
+          return this.render();
         case 'billsPreset':
           this.billsPreset(el.dataset.k);
           return this.billsReload(true);
@@ -1100,6 +1144,18 @@ const App = {
            rời ô (change), lúc đang gõ chỉ cập nhật tổng. */
       }
       if (t.dataset.pmd !== undefined) this.pos.lines[Number(t.dataset.pmd)].mdisc = t.value;
+      if (t.dataset.pdetail !== undefined){
+        /* Chọn đúng tên đã bán trước đây → điền giá lần bán gần nhất nếu ô giá còn trống. */
+        const i = Number(t.dataset.pdetail), l = this.pos.lines[i];
+        l.detail = t.value;
+        const ds = (this.posData.product_names || {})[l.sid] || [];
+        const cu = ds.find(x => x.name.toLowerCase() === t.value.trim().toLowerCase());
+        if (cu && cu.price && !l.price){
+          l.price = cu.price;
+          const o = document.querySelector(`[data-pprice="${i}"]`);
+          if (o) o.value = soTien(cu.price);
+        }
+      }
       const k = {posTip: 'tip', posGiven: 'given', posCashPart: 'cashPart', posMdReason: 'mdReason', posNote: 'note'}[t.id];
       if (k) this.pos[k] = t.value;
       return this.posLive();
@@ -1111,6 +1167,7 @@ const App = {
     const t = e.target;
     if (t.id === 'kvFile' && t.files.length) return this.importFiles(t.files);
     if (t.id === 'dayPick'){ this.cur.date = t.value; return this.render(); }
+    if (t.id === 'mineMonth' && t.value){ this.mine.month = t.value; return this.render(); }
     if (t.id === 'payMonth' && t.value){ this.cur.month = t.value; this.pay.open = 0; return this.render(); }
     if (t.id === 'roundStep' || t.id === 'roundMode'){
       return API.call('setting_save', {key: t.id === 'roundStep' ? 'disc_round' : 'disc_round_mode', value: t.value})
@@ -1193,7 +1250,7 @@ const App = {
         const r = await API.call('login', {username: v.username.trim(), password: v.password.trim()});
         API.save(r.token, r.user);
         this.today = '';
-        return this.go(r.user.role === 'owner' ? 'dash' : 'pos');
+        return this.go(this.homeTab());
       }
       if (f.id === 'newCusForm'){
         try{
@@ -1233,6 +1290,16 @@ const App = {
         await API.call('payroll_kpi_save', {month: this.data.payroll.month, barber_id: Number(f.dataset.barber),
                                             cuts: n('cuts'), combo: n('combo'), chem: n('chem'), prod: n('prod')});
         toast('Đã lưu KPI', 'ok');
+        return this.render();
+      }
+      if (f.classList.contains('repForm')){
+        await API.call('report_add', {visit_id: Number(f.dataset.vid) || 0, date: v.date || f.dataset.date || undefined, note: v.note});
+        toast('Đã gửi báo cho chủ quán', 'ok');
+        return this.render();
+      }
+      if (f.classList.contains('resForm')){
+        await API.call('report_resolve', {id: Number(f.dataset.id), reply: v.reply});
+        toast('Đã đánh dấu xử lý xong', 'ok');
         return this.render();
       }
       if (f.id === 'moveForm'){

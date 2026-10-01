@@ -160,6 +160,13 @@ function mhMigrate(PDO $pdo): void {
   mhAddColumn($pdo, 'visits', 'mdisc', 'INTEGER NOT NULL DEFAULT 0');
   mhAddColumn($pdo, 'visits', 'mdisc_note', "TEXT NOT NULL DEFAULT ''");
   mhAddColumn($pdo, 'visit_items', 'mdisc', 'INTEGER NOT NULL DEFAULT 0');
+  /* Tên sản phẩm cụ thể trên dòng "Sản phẩm A – 12%"; tài khoản thợ. */
+  mhAddColumn($pdo, 'visit_items', 'detail', "TEXT NOT NULL DEFAULT ''");
+  mhAddColumn($pdo, 'users', 'barber_id', 'INTEGER');
+  /* Mạng chập chờn: máy chủ đã ghi hoá đơn nhưng quầy không nhận được trả
+     lời, bấm lại → nhận lại đúng hoá đơn cũ thay vì tạo hoá đơn thứ hai. */
+  mhAddColumn($pdo, 'visits', 'client_ref', 'TEXT');
+  $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_visit_ref ON visits(client_ref) WHERE client_ref IS NOT NULL');
 
   if ((int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn() > 0) {
     mhSyncOwnerFromConfig($pdo);
@@ -435,11 +442,18 @@ function mhCurrentUser(): ?array {
   if (!$row) return null;
   db()->prepare('UPDATE sessions SET last_seen = ? WHERE token_hash = ?')->execute([time(), $row['token_hash']]);
   $row['id'] = (int)$row['id'];
+  $row['barber_id'] = $row['barber_id'] !== null ? (int)$row['barber_id'] : null;
   return $row;
 }
 
+/* Tài khoản thợ chỉ được xem hoá đơn của chính mình và báo sai — mọi lệnh
+   khác (tính tiền, tra khách, chốt ca…) chặn ngay ở cửa. */
+const MH_BARBER_ACTIONS = ['me', 'logout', 'my_bills', 'report_add'];
+
 function mhRequireUser(): array {
   $u = mhCurrentUser();
+  if ($u && $u['role'] === 'barber' && !in_array($GLOBALS['action'] ?? '', MH_BARBER_ACTIONS, true))
+    mhFail('Tài khoản thợ chỉ xem được hoá đơn của mình.', 403);
   if (!$u) {
     /* Mã riêng cho "hết phiên": 401 còn dùng cho "sai mật khẩu", mà gõ
        nhầm một lần rồi bị văng ra ngoài thì vô lý. */
@@ -865,12 +879,19 @@ function mhVisitList(string $where, array $args, int $limit = 200): array {
   if (!$rows) return [];
   $ids = array_map(function ($r) { return (int)$r['id']; }, $rows);
   $items = [];
-  $q = db()->query('SELECT visit_id, service_id, name, kind, qty, price, list_price, disc, mdisc FROM visit_items WHERE visit_id IN ('
+  $q = db()->query('SELECT visit_id, service_id, name, kind, qty, price, list_price, disc, mdisc, detail FROM visit_items WHERE visit_id IN ('
                    . implode(',', $ids) . ') ORDER BY id');
   foreach ($q->fetchAll() as $i)
     $items[(int)$i['visit_id']][] = ['name' => $i['name'], 'kind' => $i['kind'], 'service_id' => $i['service_id'] !== null ? (int)$i['service_id'] : null,
                                      'qty' => (int)$i['qty'], 'price' => (int)$i['price'],
-                                     'list_price' => (int)$i['list_price'], 'disc' => (int)$i['disc'], 'mdisc' => (int)$i['mdisc']];
+                                     'list_price' => (int)$i['list_price'], 'disc' => (int)$i['disc'], 'mdisc' => (int)$i['mdisc'],
+                                     'detail' => (string)$i['detail']];
+  /* Báo sai đính kèm từng hoá đơn. */
+  $bao = [];
+  $q = db()->query('SELECT r.*, u.name AS by_name, ru.name AS res_name FROM bill_reports r
+                      LEFT JOIN users u ON u.id = r.created_by LEFT JOIN users ru ON ru.id = r.resolved_by
+                     WHERE r.visit_id IN (' . implode(',', $ids) . ') ORDER BY r.id');
+  foreach ($q->fetchAll() as $b) $bao[(int)$b['visit_id']][] = mhReportRow($b);
   foreach ($rows as &$r) {
     $r['id'] = (int)$r['id']; $r['customer_id'] = $r['customer_id'] !== null ? (int)$r['customer_id'] : null;
     $r['code'] = mhBillCode($r);
@@ -880,10 +901,40 @@ function mhVisitList(string $where, array $args, int $limit = 200): array {
     $r['barber_id'] = $r['barber_id'] !== null ? (int)$r['barber_id'] : null;
     $r['void_at'] = $r['void_at'] !== null ? (int)$r['void_at'] : null;
     $r['items'] = $items[$r['id']] ?? [];
+    $r['reports'] = $bao[$r['id']] ?? [];
     $r['flags'] = array_values(array_filter(explode(',', (string)$r['flags'])));
   }
   unset($r);
   return $rows;
+}
+
+/* Tên sản phẩm cụ thể đã bán theo từng dòng sản phẩm, hay bán nhất trước,
+   kèm giá lần bán gần nhất — quầy chọn lại cho nhanh, giá tự điền. */
+function mhProductNames(): array {
+  $st = db()->prepare("SELECT i.service_id sid, i.detail d, COUNT(*) n, MAX(i.id) last FROM visit_items i
+                         JOIN visits v ON v.id = i.visit_id
+                        WHERE i.detail <> '' AND i.service_id IS NOT NULL AND v.void_at IS NULL AND v.visit_date >= ?
+                        GROUP BY i.service_id, i.detail ORDER BY n DESC");
+  $st->execute([date('Y-m-d', strtotime('-365 days'))]);
+  $rows = $st->fetchAll();
+  $gia = [];
+  if ($rows) foreach (db()->query('SELECT id, list_price FROM visit_items WHERE id IN ('
+                                  . implode(',', array_map(function ($r) { return (int)$r['last']; }, $rows)) . ')')->fetchAll() as $r)
+    $gia[(int)$r['id']] = (int)$r['list_price'];
+  $ra = [];
+  foreach ($rows as $r) {
+    $sid = (int)$r['sid'];
+    if (count($ra[$sid] ?? []) >= 40) continue;
+    $ra[$sid][] = ['name' => $r['d'], 'price' => $gia[(int)$r['last']] ?? 0];
+  }
+  return $ra;
+}
+
+function mhReportRow(array $b): array {
+  return ['id' => (int)$b['id'], 'visit_id' => $b['visit_id'] !== null ? (int)$b['visit_id'] : null,
+          'date' => $b['report_date'], 'note' => $b['note'], 'status' => $b['status'], 'reply' => $b['reply'],
+          'by' => $b['by_name'] ?? null, 'at' => (int)$b['created_at'], 'created_by' => $b['created_by'] !== null ? (int)$b['created_by'] : null,
+          'res_by' => $b['res_name'] ?? null, 'res_at' => $b['resolved_at'] !== null ? (int)$b['resolved_at'] : null];
 }
 
 /* Mã hoá đơn để hiện và in: hoá đơn nhập từ KiotViet giữ mã bên đó
