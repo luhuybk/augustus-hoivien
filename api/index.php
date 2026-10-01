@@ -897,6 +897,27 @@ case 'book_day': {
        'services' => $svc, 'groups' => mhGroups(), 'unconfirmed' => $cho]);
 }
 
+/* Lịch theo tuần / tháng: mọi lịch hẹn còn hiệu lực trong khoảng ngày,
+   gọn — để quầy nhìn trước mấy ngày tới đã kín chưa. */
+case 'book_range': {
+  $u = mhRequireUser();
+  $owner = mhIsOwner($u);
+  $tu = validDate(inp('from')) ? inp('from') : mhToday();
+  $den = validDate(inp('to')) ? inp('to') : $tu;
+  if ($den < $tu) [$tu, $den] = [$den, $tu];
+  if ((strtotime($den) - strtotime($tu)) / 86400 > 45) out(['ok' => false, 'error' => 'Khoảng ngày dài quá.'], 400);
+  $st = db()->prepare("SELECT * FROM bookings WHERE book_date BETWEEN ? AND ? AND status IN ('booked', 'arrived', 'done')
+                        ORDER BY book_date, start_min");
+  $st->execute([$tu, $den]);
+  $rows = array_map(function ($b) use ($owner) { return mhBookRow($b, $owner || $b['source'] === 'online'); }, $st->fetchAll());
+  $st = db()->prepare('SELECT * FROM barber_off WHERE off_date BETWEEN ? AND ? ORDER BY off_date, start_min');
+  $st->execute([$tu, $den]);
+  $off = array_map(function ($o) { return ['date' => $o['off_date'], 'barber_id' => (int)$o['barber_id'], 'start' => (int)$o['start_min'],
+                                          'end' => (int)$o['end_min'], 'note' => $o['note']]; }, $st->fetchAll());
+  out(['ok' => true, 'from' => $tu, 'to' => $den, 'rows' => $rows, 'off' => $off, 'cfg' => mhBookCfg(),
+       'barbers' => array_map(function ($b) { return ['id' => $b['id'], 'name' => $b['name']]; }, mhBarbers(true))]);
+}
+
 /* Giờ còn trống cho quầy chọn (không áp luật đặt trước như khách tự đặt). */
 case 'book_slots': {
   mhRequireUser();

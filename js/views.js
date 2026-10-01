@@ -817,11 +817,7 @@ const Views = {
     const tt = {booked: '', arrived: 'đang làm', done: 'đã tính tiền', noshow: 'không đến', cancel: 'đã huỷ'};
     const sel = d.rows.find(x => x.id === ui.sel);
     return `<div class="wrap wide-wrap">
-      ${head('Lịch hẹn', false, '<button class="chip" data-act="reload">↻</button>')}
-      <div class="schednav"><button class="chip" data-act="schedDay" data-d="-1" aria-label="Ngày trước">‹</button>
-        <input type="date" id="schedDate" class="inp" value="${esc(d.date)}">
-        <button class="chip" data-act="schedDay" data-d="1" aria-label="Ngày sau">›</button>
-        ${homNay ? '' : '<button class="chip" data-act="schedDay" data-d="0">Hôm nay</button>'}</div>
+      ${this.schedNav(ui, d.date)}
       <p class="dim" style="margin-top:0">${thuCua(d.date)} · ${ngay(d.date)} · ${conHieuLuc.length} lịch hẹn
         ${nghiQuan ? ' · <b style="color:var(--warn)">ngày quán nghỉ</b>' : ''}</p>
       ${d.unconfirmed ? `<p class="note" style="color:var(--warn)">🌐 ${d.unconfirmed} lịch khách tự đặt chưa gọi xác nhận (đánh dấu 🌐 trên lịch).</p>` : ''}
@@ -843,6 +839,70 @@ const Views = {
           ${tt[x.status] ? `<span class="badge${x.status === 'noshow' || x.status === 'cancel' ? ' bad' : ''}">${tt[x.status]}</span>` : ''}
         </button>`).join('')}</div></div>` : ''}
     </div>`;
+  },
+
+  /* Đầu màn Lịch hẹn: Ngày / Tuần / Tháng, lùi / tới, chọn ngày. */
+  schedNav(ui, date){
+    const nay = App.today;
+    const coNay = ui.mode === 'month' ? date.slice(0, 7) === nay.slice(0, 7)
+      : ui.mode === 'week' ? App.weekStart(date) === App.weekStart(nay) : date === nay;
+    return `${head('Lịch hẹn', false, '<button class="chip" data-act="reload">↻</button>')}
+      <div class="schednav">
+        <div class="seg">${[['day', 'Ngày'], ['week', 'Tuần'], ['month', 'Tháng']].map(([k, n]) =>
+          `<button class="chip${ui.mode === k ? ' on' : ''}" data-act="schedMode" data-k="${k}">${n}</button>`).join('')}</div>
+        <button class="chip" data-act="schedDay" data-d="-1" aria-label="Trước">‹</button>
+        <input type="date" id="schedDate" class="inp" value="${esc(date)}">
+        <button class="chip" data-act="schedDay" data-d="1" aria-label="Sau">›</button>
+        ${coNay ? '' : '<button class="chip" data-act="schedDay" data-d="0">Hôm nay</button>'}</div>`;
+  },
+
+  /* Lịch tuần / tháng — nhìn trước mấy ngày tới kín tới đâu. Bấm một ngày
+     (hay một lịch) là mở lịch ngày đó. */
+  schedRange(d, ui){
+    const ten = id => (d.barbers.find(b => b.id === id) || {}).name || '?';
+    const theoNgay = {};
+    d.rows.forEach(b => (theoNgay[b.date] = theoNgay[b.date] || []).push(b));
+    const offNgay = {};
+    d.off.forEach(o => (offNgay[o.date] = offNgay[o.date] || []).push(o));
+    const ngays = [];
+    for (let x = new Date(d.from + 'T00:00:00'); App.iso(x) <= d.to; x.setDate(x.getDate() + 1)) ngays.push(App.iso(x));
+    const nghi = n => d.cfg.closed_days.includes(new Date(n + 'T00:00:00').getDay());
+    const chuaXN = d.rows.filter(b => !b.confirmed && b.status === 'booked').length;
+    const tong = `<p class="dim" style="margin-top:0">${ngay(d.from)} → ${ngay(d.to)} · ${d.rows.length} lịch hẹn
+      ${chuaXN ? ` · <b style="color:var(--warn)">🌐 ${chuaXN} chưa xác nhận</b>` : ''}</p>`;
+
+    if (ui.mode === 'week'){
+      return `<div class="wrap">${this.schedNav(ui, ui.date)}${tong}
+        <div class="week">${ngays.map(n => {
+          const ds = theoNgay[n] || [], os = offNgay[n] || [];
+          const dem = d.barbers.map(b => [b, ds.filter(x => x.barber_id === b.id).length]);
+          return `<div class="wday${n === App.today ? ' today' : ''}${nghi(n) ? ' closed' : ''}">
+            <button class="whead" data-act="schedGo" data-d="${n}"><b>${thuCua(n)} ${ngayNgan(n)}</b>
+              <span>${ds.length ? ds.length + ' lịch' : nghi(n) ? 'nghỉ' : 'trống'}</span></button>
+            <div class="wcount">${dem.map(([b, k]) => `<span>✂︎ ${esc(b.name.split(' ').pop())} <b>${k}</b></span>`).join('')}</div>
+            ${os.map(o => `<div class="woff">${esc(ten(o.barber_id).split(' ').pop())} nghỉ ${o.start > 0 || o.end < 1440 ? hm(o.start) + '–' + hm(o.end) : 'cả ngày'}</div>`).join('')}
+            ${ds.map(b => `<button class="wbk${b.confirmed ? '' : ' unconf'}${b.status === 'done' ? ' done' : ''}" data-act="schedGo" data-d="${n}" data-id="${b.id}">
+              <b>${hm(b.start)}</b> ${esc(b.name || 'Khách')}${b.confirmed ? '' : ' 🌐'}
+              <small>✂︎ ${esc(ten(b.barber_id).split(' ').pop())} · ${esc(b.services.map(v => v.name).join(', ') || '—')}</small></button>`).join('')}
+          </div>`; }).join('')}</div></div>`;
+    }
+
+    /* Tháng: lịch 7 cột, mỗi ô số lịch hẹn theo từng thợ. */
+    const thang = ui.date.slice(0, 7);
+    return `<div class="wrap">${this.schedNav(ui, ui.date)}
+      <p class="dim" style="margin-top:0">Tháng ${thang.slice(5)}/${thang.slice(0, 4)} · ${d.rows.filter(b => b.date.slice(0, 7) === thang).length} lịch hẹn
+        ${chuaXN ? ` · <b style="color:var(--warn)">🌐 ${chuaXN} chưa xác nhận</b>` : ''}</p>
+      <div class="month">${['T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'CN'].map(t => `<div class="mhd">${t}</div>`).join('')}
+        ${ngays.map(n => {
+          const ds = theoNgay[n] || [], ngoai = n.slice(0, 7) !== thang;
+          const cho = ds.filter(b => !b.confirmed && b.status === 'booked').length;
+          return `<button class="mday${ngoai ? ' out' : ''}${n === App.today ? ' today' : ''}${nghi(n) ? ' closed' : ''}${n < App.today ? ' past' : ''}" data-act="schedGo" data-d="${n}">
+            <span class="mn">${Number(n.slice(8))}</span>
+            ${ds.length ? `<b class="mc">${ds.length}</b>` : ''}${cho ? '<i class="mu">🌐</i>' : ''}
+            ${ds.length ? `<span class="mb">${d.barbers.map(b => { const k = ds.filter(x => x.barber_id === b.id).length;
+              return k ? `<em>${esc(b.name.split(' ').pop().slice(0, 4))} ${k}</em>` : ''; }).join('')}</span>` : ''}
+            ${(offNgay[n] || []).length ? '<span class="mo">có thợ nghỉ</span>' : ''}
+          </button>`; }).join('')}</div></div>`;
   },
 
   bookDetail(b, d){

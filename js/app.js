@@ -30,7 +30,12 @@ const App = {
   pos: null,              /* hoá đơn đang lập — giữ nguyên khi chuyển tab qua lại */
   pay: {open: 0},
   mine: {month: ''},
-  sched: {date: '', sel: 0, form: null, off: null},
+  sched: {date: '', sel: 0, form: null, off: null, mode: 'day'},
+
+  iso(x){ return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0'); },
+  addDays(d, n){ const x = new Date(d + 'T00:00:00'); x.setDate(x.getDate() + n); return this.iso(x); },
+  /* Thứ Hai của tuần chứa ngày d. */
+  weekStart(d){ const x = new Date(d + 'T00:00:00'); return this.addDays(d, -((x.getDay() + 6) % 7)); },
   bills: {preset: 'today', from: '', to: '', q: '', barber: '', only: '', pay: '', src: '', limit: 200},
 
   get cur(){ return this.stack[this.stack.length - 1]; },
@@ -163,8 +168,22 @@ const App = {
         break;
       }
       case 'sched': {
-        if (!this.sched.date) this.sched.date = this.today;
-        this.data.sched = await API.call('book_day', {date: this.sched.date});
+        const ui = this.sched;
+        if (!ui.date) ui.date = this.today;
+        if (ui.mode === 'week' || ui.mode === 'month'){
+          /* Tuần: T2 → CN. Tháng: đủ các tuần chứa tháng đó (6 hàng tối đa). */
+          let tu, den;
+          if (ui.mode === 'week'){ tu = this.weekStart(ui.date); den = this.addDays(tu, 6); }
+          else {
+            const dau = ui.date.slice(0, 8) + '01';
+            const cuoi = this.iso(new Date(Number(dau.slice(0, 4)), Number(dau.slice(5, 7)), 0));
+            tu = this.weekStart(dau); den = this.addDays(this.weekStart(cuoi), 6);
+          }
+          this.data.schedRange = await API.call('book_range', {from: tu, to: den});
+          view.innerHTML = Views.schedRange(this.data.schedRange, ui);
+          break;
+        }
+        this.data.sched = await API.call('book_day', {date: ui.date});
         this.drawSched();
         break;
       }
@@ -789,13 +808,23 @@ const App = {
         }
         /* ----- lịch hẹn ----- */
         case 'schedDay': {
-          const k = Number(el.dataset.d);
-          if (!k) this.sched.date = this.today;
-          else { const x = new Date(this.sched.date + 'T00:00:00'); x.setDate(x.getDate() + k);
-                 this.sched.date = x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0'); }
-          Object.assign(this.sched, {sel: 0, form: null, off: null});
+          const k = Number(el.dataset.d), ui = this.sched;
+          if (!k) ui.date = this.today;
+          else if (ui.mode === 'week') ui.date = this.addDays(ui.date, 7 * k);
+          else if (ui.mode === 'month'){ const x = new Date(ui.date.slice(0, 8) + '01T00:00:00'); x.setMonth(x.getMonth() + k); ui.date = this.iso(x); }
+          else ui.date = this.addDays(ui.date, k);
+          Object.assign(ui, {sel: 0, form: null, off: null});
           return this.render();
         }
+        case 'schedMode':
+          Object.assign(this.sched, {mode: el.dataset.k, sel: 0, form: null, off: null});
+          return this.render();
+        /* Từ tuần / tháng bấm một ngày (hay một lịch) → mở lịch ngày đó. */
+        case 'schedGo':
+          Object.assign(this.sched, {mode: 'day', date: el.dataset.d, sel: id || 0, form: null, off: null});
+          await this.render();
+          if (id){ const p = $('#schedPanel'); if (p) p.scrollIntoView({block: 'start'}); }
+          return;
         case 'schedAt': {
           /* Bấm chỗ trống trên cột thợ → đặt lịch đúng thợ, đúng giờ (làm tròn theo bước). */
           if (e.target !== el && !e.target.classList.contains('sline')) return;
