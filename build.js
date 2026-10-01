@@ -56,7 +56,7 @@ put('index.html', read('index.html').replace(
 for (const f of ['css/style.css', ...JS, 'manifest.webmanifest', 'icon.svg']) copy(f);
 
 /* Phần máy chủ: mọi thứ trừ config.php và dữ liệu. */
-for (const f of ['index.php', 'lib.php', 'schema.sql', '.htaccess']) copy('api/' + f);
+for (const f of ['index.php', 'lib.php', 'schema.sql', 'backup.php', '.htaccess']) copy('api/' + f);
 
 copy('api/config.example.php');
 

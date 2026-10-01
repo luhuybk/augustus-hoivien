@@ -341,7 +341,14 @@ case 'pos_init': {
        'promos' => array_map(function ($p) { return ['id' => $p['id'], 'name' => $p['name'], 'kind' => $p['kind'], 'value' => $p['value']]; },
                              mhPromos(true)),
        'groups' => mhGroups(), 'round' => mhRoundCfg(), 'today' => mhToday(),
-       'product_names' => mhProductNames()]);
+       'product_names' => mhProductNames(),
+       /* Lịch hẹn hôm nay chưa xong — hiện đầu màn bán hàng, bấm "Khách đến"
+          là điền sẵn khách, thợ, dịch vụ. */
+       'bookings' => (function () use ($owner) {
+         $st = db()->prepare("SELECT * FROM bookings WHERE book_date = ? AND status IN ('booked', 'arrived') ORDER BY start_min");
+         $st->execute([mhToday()]);
+         return array_map(function ($b) use ($owner) { return mhBookRow($b, $owner || $b['source'] === 'online'); }, $st->fetchAll());
+       })()]);
 }
 
 /* Tạo hoá đơn. Giá, giảm giá đều tính lại ở máy chủ từ bảng dịch vụ —
@@ -468,6 +475,9 @@ case 'bill_create': {
                    $q['lines'][$i]['net'], $l['unit'], $q['lines'][$i]['disc'], $q['lines'][$i]['mdisc'], $l['detail']]);
   $pdo->commit();
 
+  if ($bk = (int)inp('booking_id', 0))
+    db()->prepare("UPDATE bookings SET status = 'done', visit_id = ?, updated_at = ? WHERE id = ? AND status IN ('booked', 'arrived')")
+        ->execute([$vid, time(), $bk]);
   $moi = $c ? array_values(array_diff_key(pendingKeys($cid), $truoc)) : [];
   mhAudit($u['id'], 'bill_create', "#$vid " . ($c ? "khách #$cid" : 'khách lẻ') . ' · '
           . implode(', ', array_map(function ($l) { return $l['svc']['name'] . ($l['detail'] !== '' ? ' (' . $l['detail'] . ')' : '')
@@ -854,6 +864,319 @@ case 'bills': {
        'barbers' => array_map(function ($b) { return ['id' => $b['id'], 'name' => $b['name'], 'active' => $b['active']]; }, mhBarbers())]);
 }
 
+/* ===== đặt lịch — quầy & chủ ===== */
+
+/* Một ngày trên sổ lịch: lịch hẹn, thợ, giờ nghỉ, cấu hình. Quầy thấy số
+   khách đầy đủ ở lịch khách TỰ ĐẶT (để gọi xác nhận); lịch quầy tạo từ khách
+   có sẵn thì số vẫn che như mọi chỗ khác. */
+case 'book_day': {
+  $u = mhRequireUser();
+  $owner = mhIsOwner($u);
+  $date = validDate(inp('date')) ? inp('date') : mhToday();
+  $st = db()->prepare('SELECT b.*, u.name AS by_name FROM bookings b LEFT JOIN users u ON u.id = b.created_by
+                        WHERE b.book_date = ? ORDER BY b.start_min, b.id');
+  $st->execute([$date]);
+  $rows = array_map(function ($b) use ($owner) { return mhBookRow($b, $owner || $b['source'] === 'online'); }, $st->fetchAll());
+  /* Hạng của khách quen — quầy nhìn là biết khách VIP. */
+  $tiers = mhTiers();
+  foreach ($rows as &$r) {
+    $r['tier'] = null;
+    if ($r['customer_id']) { $x = mhStats($r['customer_id'])[$r['customer_id']]; $r['tier'] = mhTierOf($x['cuts'], $x['spend'], $tiers)['tier']; }
+  }
+  unset($r);
+  $st = db()->prepare('SELECT * FROM barber_off WHERE off_date = ? ORDER BY start_min');
+  $st->execute([$date]);
+  $off = array_map(function ($o) { return ['id' => (int)$o['id'], 'barber_id' => (int)$o['barber_id'], 'start' => (int)$o['start_min'],
+                                          'end' => (int)$o['end_min'], 'note' => $o['note']]; }, $st->fetchAll());
+  $cho = (int)db()->query("SELECT COUNT(*) FROM bookings WHERE confirmed = 0 AND status = 'booked' AND book_date >= '" . mhToday() . "'")->fetchColumn();
+  $svc = array_values(array_map(function ($s) { return ['id' => $s['id'], 'name' => $s['name'], 'duration' => $s['duration'], 'grp' => $s['grp'],
+                                                        'price' => $s['price'], 'bookable' => $s['bookable']]; },
+                                array_filter(mhServices(true), function ($s) { return $s['kind'] !== 'product'; })));
+  out(['ok' => true, 'date' => $date, 'rows' => $rows, 'off' => $off, 'cfg' => mhBookCfg(), 'now' => mhNowMin(),
+       'barbers' => array_map(function ($b) { return ['id' => $b['id'], 'name' => $b['name']]; }, mhBarbers(true)),
+       'services' => $svc, 'groups' => mhGroups(), 'unconfirmed' => $cho]);
+}
+
+/* Giờ còn trống cho quầy chọn (không áp luật đặt trước như khách tự đặt). */
+case 'book_slots': {
+  mhRequireUser();
+  $date = validDate(inp('date')) ? inp('date') : mhToday();
+  $ra = mhSlots($date, max(15, (int)inp('dur', 45)), (int)inp('barber_id', 0) ?: null, false, (int)inp('id', 0));
+  out(['ok' => true, 'slots' => $ra]);
+}
+
+/* Tạo / sửa lịch hẹn. Trùng giờ với thợ đã chọn thì báo — quầy bấm "vẫn
+   đặt" (force) khi biết chắc, vd. hai khách đi cùng nhau. */
+case 'book_save': {
+  $u = mhRequireUser();
+  $id = (int)inp('id', 0);
+  $cu = null;
+  if ($id) {
+    $st = db()->prepare('SELECT * FROM bookings WHERE id = ?'); $st->execute([$id]);
+    if (!($cu = $st->fetch())) out(['ok' => false, 'error' => 'Không tìm thấy lịch hẹn.'], 404);
+    if (!in_array($cu['status'], ['booked', 'arrived'], true)) out(['ok' => false, 'error' => 'Lịch này đã xong hoặc đã huỷ.'], 409);
+  }
+  $date = (string)inp('date', '');
+  if (!validDate($date)) out(['ok' => false, 'error' => 'Chọn ngày.'], 400);
+  if ($date < mhToday() && !mhIsOwner($u)) out(['ok' => false, 'error' => 'Không đặt lịch cho ngày đã qua.'], 400);
+  $start = (int)inp('start', -1);
+  if ($start < 0 || $start > 1425 || $start % 5) out(['ok' => false, 'error' => 'Chọn giờ.'], 400);
+  [$ds, $durSv] = mhBookServices(inp('services', []), false);
+  $dur = (int)inp('dur', 0) ?: $durSv;
+  $dur = max(15, min(480, $dur));
+  if ($start + $dur > 1440) out(['ok' => false, 'error' => 'Quá nửa đêm rồi.'], 400);
+
+  /* Khách: khách có sẵn (customer_id) hoặc tên + số điện thoại. */
+  $cid = (int)inp('customer_id', 0) ?: null;
+  $name = mb_substr(trim((string)inp('name', '')), 0, 60);
+  $phone = mhPhone((string)inp('phone', ''));
+  if ($cid) {
+    $c = mhCustomerRow($cid);
+    if (!$c) out(['ok' => false, 'error' => 'Không tìm thấy khách.'], 404);
+    $name = $c['name'] ?: $name; $phone = $c['phone'];
+  } elseif ($cu && inp('phone') === null) {
+    /* Sửa giờ / thợ, không đụng tới khách: giữ nguyên (quầy chỉ thấy số đã che). */
+    $cid = $cu['customer_id'] !== null ? (int)$cu['customer_id'] : null;
+    $name = $name !== '' ? $name : $cu['name']; $phone = $cu['phone'];
+  } else {
+    if ($name === '') out(['ok' => false, 'error' => 'Nhập tên khách.'], 400);
+    if ($phone !== '' && !preg_match('/^0\d{9}$/', $phone)) out(['ok' => false, 'error' => 'Số điện thoại phải đủ 10 số.'], 400);
+    if ($phone !== '' && ($c = mhFindByPhone($phone))) $cid = (int)$c['id'];
+  }
+
+  /* Thợ: 0 = ai cũng được → chọn thợ trống. */
+  $busy = mhBusy($date, $id);
+  $bid = (int)inp('barber_id', 0);
+  $any = $bid ? 0 : 1;
+  $tho = array_column(mhBarbers(true), 'id');
+  if ($bid && !in_array($bid, $tho, true)) out(['ok' => false, 'error' => 'Thợ này không còn làm.'], 400);
+  if (!$bid) {
+    $trong = array_values(array_filter($tho, function ($b) use ($busy, $start, $dur) { return mhFreeAt($busy, $b, $start, $start + $dur); }));
+    if (!$trong && !inp('force')) out(['ok' => false, 'code' => 'busy', 'error' => 'Giờ này không còn thợ nào trống.'], 409);
+    $bid = $trong ? mhPickBarber($busy, $trong) : ($tho[0] ?? 0);
+    if (!$bid) out(['ok' => false, 'error' => 'Chưa khai thợ nào.'], 400);
+  } elseif (!mhFreeAt($busy, $bid, $start, $start + $dur) && !inp('force')) {
+    out(['ok' => false, 'code' => 'busy', 'error' => 'Thợ này đã có lịch hoặc nghỉ trong khoảng giờ đó.'], 409);
+  }
+  $vals = [$date, $start, $dur, $bid, $any, $cid, $name, $phone, json_encode($ds, JSON_UNESCAPED_UNICODE),
+           mb_substr(trim((string)inp('note', '')), 0, 300), time()];
+  if ($cu) {
+    db()->prepare('UPDATE bookings SET book_date=?, start_min=?, dur=?, barber_id=?, any_barber=?, customer_id=?, name=?, phone=?,
+                     services=?, note=?, updated_at=?, confirmed=1 WHERE id=?')->execute(array_merge($vals, [$id]));
+  } else {
+    db()->prepare("INSERT INTO bookings (book_date, start_min, dur, barber_id, any_barber, customer_id, name, phone, services, note,
+                     updated_at, created_at, created_by, source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'staff')")
+        ->execute(array_merge($vals, [time(), $u['id']]));
+    $id = (int)db()->lastInsertId();
+  }
+  mhAudit($u['id'], 'book_save', "#$id $date " . sprintf('%02d:%02d', intdiv($start, 60), $start % 60) . " · $name · thợ #$bid");
+  out(['ok' => true, 'id' => $id]);
+}
+
+/* Đổi trạng thái: xác nhận (lịch khách tự đặt), khách đến, không đến, huỷ,
+   đặt lại như cũ. */
+case 'book_status': {
+  $u = mhRequireUser();
+  $id = (int)inp('id', 0);
+  $st = db()->prepare('SELECT * FROM bookings WHERE id = ?'); $st->execute([$id]);
+  $b = $st->fetch();
+  if (!$b) out(['ok' => false, 'error' => 'Không tìm thấy lịch hẹn.'], 404);
+  $moi = (string)inp('status', '');
+  if ($moi === 'confirm') {
+    db()->prepare('UPDATE bookings SET confirmed = 1, updated_at = ? WHERE id = ?')->execute([time(), $id]);
+  } else {
+    if (!in_array($moi, ['booked', 'arrived', 'noshow', 'cancel'], true)) out(['ok' => false, 'error' => 'Trạng thái không đúng.'], 400);
+    if ($b['status'] === 'done') out(['ok' => false, 'error' => 'Lịch này đã tính tiền xong.'], 409);
+    if ($moi === 'booked' && in_array($b['status'], ['noshow', 'cancel'], true)) {
+      $busy = mhBusy($b['book_date'], $id);
+      if (!mhFreeAt($busy, (int)$b['barber_id'], (int)$b['start_min'], (int)$b['start_min'] + (int)$b['dur']))
+        out(['ok' => false, 'error' => 'Giờ đó thợ đã có lịch khác — sửa giờ rồi đặt lại.'], 409);
+    }
+    db()->prepare('UPDATE bookings SET status = ?, cancel_note = ?, updated_at = ?, confirmed = CASE WHEN ? = \'arrived\' THEN 1 ELSE confirmed END WHERE id = ?')
+        ->execute([$moi, mb_substr(trim((string)inp('note', '')), 0, 200), time(), $moi, $id]);
+  }
+  mhAudit($u['id'], 'book_status', "#$id → $moi");
+  out(['ok' => true]);
+}
+
+case 'book_off_add': {
+  $u = mhRequireUser();
+  $bid = (int)inp('barber_id', 0);
+  $date = (string)inp('date', '');
+  if (!in_array($bid, array_column(mhBarbers(true), 'id'), true)) out(['ok' => false, 'error' => 'Chọn thợ.'], 400);
+  if (!validDate($date)) out(['ok' => false, 'error' => 'Chọn ngày.'], 400);
+  $a = max(0, min(1440, (int)inp('start', 0))); $b = max(0, min(1440, (int)inp('end', 1440)));
+  if ($b <= $a) out(['ok' => false, 'error' => 'Giờ kết thúc phải sau giờ bắt đầu.'], 400);
+  db()->prepare('INSERT INTO barber_off (barber_id, off_date, start_min, end_min, note, created_at, created_by) VALUES (?,?,?,?,?,?,?)')
+      ->execute([$bid, $date, $a, $b, mb_substr(trim((string)inp('note', '')), 0, 100), time(), $u['id']]);
+  /* Lịch đã đặt rơi vào giờ nghỉ — báo để quầy dời. */
+  $st = db()->prepare("SELECT COUNT(*) FROM bookings WHERE barber_id = ? AND book_date = ? AND status IN ('booked','arrived')
+                         AND start_min < ? AND start_min + dur > ?");
+  $st->execute([$bid, $date, $b, $a]);
+  mhAudit($u['id'], 'book_off', "thợ #$bid nghỉ $date $a-$b");
+  out(['ok' => true, 'clash' => (int)$st->fetchColumn()]);
+}
+
+case 'book_off_del': {
+  $u = mhRequireUser();
+  db()->prepare('DELETE FROM barber_off WHERE id = ?')->execute([(int)inp('id', 0)]);
+  mhAudit($u['id'], 'book_off_del', '#' . (int)inp('id', 0));
+  out(['ok' => true]);
+}
+
+/* Tài khoản thợ: lịch hẹn của mình từ hôm nay tới 7 ngày sau. */
+case 'book_mine': {
+  $u = mhRequireUser();
+  if ($u['role'] !== 'barber' || !$u['barber_id']) out(['ok' => false, 'error' => 'Tài khoản này chưa gắn với thợ nào.'], 403);
+  $st = db()->prepare("SELECT * FROM bookings WHERE barber_id = ? AND book_date BETWEEN ? AND ? AND status IN ('booked','arrived','done')
+                        ORDER BY book_date, start_min");
+  $st->execute([$u['barber_id'], mhToday(), date('Y-m-d', strtotime('+7 days'))]);
+  $st2 = db()->prepare('SELECT * FROM barber_off WHERE barber_id = ? AND off_date BETWEEN ? AND ? ORDER BY off_date, start_min');
+  $st2->execute([$u['barber_id'], mhToday(), date('Y-m-d', strtotime('+7 days'))]);
+  out(['ok' => true, 'rows' => array_map(function ($b) { return mhBookRow($b, false); }, $st->fetchAll()),
+       'off' => array_map(function ($o) { return ['date' => $o['off_date'], 'start' => (int)$o['start_min'], 'end' => (int)$o['end_min'], 'note' => $o['note']]; }, $st2->fetchAll())]);
+}
+
+case 'book_settings_save': {
+  $u = mhRequireOwner();
+  $gio = function ($k) { $v = (string)inp($k, ''); if (!preg_match('/^([01]?\d|2[0-3]):([0-5]\d)$/', $v)) out(['ok' => false, 'error' => 'Giờ không đúng.'], 400); return $v; };
+  $mo = $gio('open'); $dong = $gio('close');
+  if (strcmp(str_pad($dong, 5, '0', STR_PAD_LEFT), str_pad($mo, 5, '0', STR_PAD_LEFT)) <= 0) out(['ok' => false, 'error' => 'Giờ đóng cửa phải sau giờ mở cửa.'], 400);
+  $nghi = implode(',', array_values(array_unique(array_filter(array_map('intval', (array)inp('closed_days', [])), function ($d) { return $d >= 0 && $d <= 6; }))));
+  $kv = ['book_open' => $mo, 'book_close' => $dong, 'book_step' => in_array((int)inp('step'), [15, 30], true) ? (string)(int)inp('step') : '15',
+         'book_online' => inp('online') ? '1' : '0', 'book_days' => (string)max(1, min(60, (int)inp('days', 14))),
+         'book_notice' => (string)max(0, min(1440, (int)inp('notice', 60))), 'book_closed_days' => $nghi,
+         'book_msg' => mb_substr(trim((string)inp('msg', '')), 0, 300),
+         'book_noshow_block' => (string)max(1, min(10, (int)inp('noshow_block', 2)))];
+  $st = db()->prepare('INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+  foreach ($kv as $k => $v) $st->execute([$k, $v]);
+  mhAudit($u['id'], 'book_settings', json_encode($kv, JSON_UNESCAPED_UNICODE));
+  out(['ok' => true, 'cfg' => mhBookCfg()]);
+}
+
+/* ===== đặt lịch — trang khách tự đặt (không đăng nhập) =====
+   Chỉ trả những gì trang công khai cần: tên dịch vụ, giá, thời gian, tên
+   thợ, giờ trống. Không bao giờ trả thông tin khách nào khác. */
+case 'pub_book_init': {
+  $cfg = mhBookCfg();
+  out(['ok' => true, 'shop' => MH_SHOP_NAME, 'today' => mhToday(), 'now' => mhNowMin(),
+       'cfg' => ['open' => $cfg['open'], 'close' => $cfg['close'], 'days' => $cfg['days'], 'closed_days' => $cfg['closed_days'],
+                 'online' => $cfg['online'], 'msg' => $cfg['msg']],
+       'services' => array_values(array_map(function ($s) { return ['id' => $s['id'], 'name' => $s['name'], 'price' => $s['price'],
+                                                                    'duration' => $s['duration'] ?: 30, 'grp' => $s['grp'], 'note' => $s['note']]; },
+                      array_filter(mhServices(true), function ($s) { return $s['bookable'] && $s['kind'] !== 'product'; }))),
+       'groups' => mhGroups(),
+       'barbers' => array_map(function ($b) { return ['id' => $b['id'], 'name' => $b['name']]; }, mhBarbers(true))]);
+}
+
+case 'pub_slots': {
+  if (!mhBookCfg()['online']) out(['ok' => false, 'error' => 'Quán tạm ngưng nhận đặt lịch online — gọi điện cho quán nhé.'], 403);
+  $date = validDate(inp('date')) ? inp('date') : mhToday();
+  [$ds, $dur] = mhBookServices(inp('services', []), true);
+  if (!$ds) out(['ok' => false, 'error' => 'Chọn dịch vụ trước.'], 400);
+  $ra = mhSlots($date, $dur, (int)inp('barber_id', 0) ?: null, true);
+  out(['ok' => true, 'dur' => $dur, 'slots' => array_map(function ($x) { return $x[0]; }, $ra)]);
+}
+
+case 'pub_book': {
+  $cfg = mhBookCfg();
+  if (!$cfg['online']) out(['ok' => false, 'error' => 'Quán tạm ngưng nhận đặt lịch online — gọi điện cho quán nhé.'], 403);
+  if (trim((string)inp('website', '')) !== '') out(['ok' => true, 'token' => '']);       // bẫy máy dò: ô ẩn mà có chữ
+  $ip = mhClientIp();
+  $st = db()->prepare("SELECT COUNT(*) FROM bookings WHERE source = 'online' AND ip = ? AND created_at > ?");
+  $st->execute([$ip, time() - 3600]);
+  if ((int)$st->fetchColumn() >= 5) out(['ok' => false, 'error' => 'Đặt nhiều quá — thử lại sau ít phút, hoặc gọi quán.'], 429);
+
+  $name = mb_substr(trim(preg_replace('/\s+/u', ' ', (string)inp('name', ''))), 0, 40);
+  $phone = mhPhone((string)inp('phone', ''));
+  if (mb_strlen($name) < 2) out(['ok' => false, 'error' => 'Nhập tên của anh.'], 400);
+  if (!preg_match('/^0\d{9}$/', $phone)) out(['ok' => false, 'error' => 'Số điện thoại phải đủ 10 số, bắt đầu bằng 0.'], 400);
+  $date = (string)inp('date', ''); $start = (int)inp('start', -1);
+  if (!validDate($date)) out(['ok' => false, 'error' => 'Chọn ngày.'], 400);
+  [$ds, $dur] = mhBookServices(inp('services', []), true);
+  if (!$ds) out(['ok' => false, 'error' => 'Chọn dịch vụ.'], 400);
+
+  /* Mỗi số chỉ giữ một lịch chưa tới; hay bỏ hẹn thì gọi quán. */
+  $st = db()->prepare("SELECT book_date, start_min FROM bookings WHERE phone = ? AND status = 'booked'
+                         AND (book_date > ? OR (book_date = ? AND start_min + dur > ?)) LIMIT 1");
+  $st->execute([$phone, mhToday(), mhToday(), mhNowMin()]);
+  if ($co = $st->fetch())
+    out(['ok' => false, 'code' => 'has_booking', 'error' => 'Số này đã có lịch lúc ' . sprintf('%02d:%02d', intdiv((int)$co['start_min'], 60), (int)$co['start_min'] % 60)
+         . ' ngày ' . date('d/m', strtotime($co['book_date'])) . '. Muốn đổi giờ thì huỷ lịch cũ (link lúc đặt) hoặc gọi quán.'], 409);
+  $st = db()->prepare("SELECT COUNT(*) FROM bookings WHERE phone = ? AND status = 'noshow' AND book_date >= ?");
+  $st->execute([$phone, date('Y-m-d', strtotime('-180 days'))]);
+  if ((int)$st->fetchColumn() >= $cfg['noshow_block'])
+    out(['ok' => false, 'error' => 'Số này cần gọi điện cho quán để đặt lịch.'], 403);
+
+  $bid = (int)inp('barber_id', 0) ?: null;
+  $pdo = db();
+  $pdo->exec('BEGIN IMMEDIATE');           // hai người bấm cùng một giờ: người sau thấy giờ đã kín
+  $gio = null;
+  foreach (mhSlots($date, $dur, $bid, true) as [$t, $trong]) if ($t === $start) $gio = $trong;
+  if (!$gio) { $pdo->exec('ROLLBACK'); out(['ok' => false, 'code' => 'taken', 'error' => 'Giờ này vừa có người đặt — chọn giờ khác nhé.'], 409); }
+  $tho = $bid ?: mhPickBarber(mhBusy($date), $gio);
+  $c = mhFindByPhone($phone);
+  $token = bin2hex(random_bytes(16));
+  $pdo->prepare("INSERT INTO bookings (book_date, start_min, dur, barber_id, any_barber, customer_id, name, phone, services, note, status,
+                   confirmed, source, token_hash, ip, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,'booked',0,'online',?,?,?,?)")
+      ->execute([$date, $start, $dur, $tho, $bid ? 0 : 1, $c ? (int)$c['id'] : null, $name, $phone,
+                 json_encode($ds, JSON_UNESCAPED_UNICODE), mb_substr(trim((string)inp('note', '')), 0, 200),
+                 hash('sha256', $token), $ip, time(), time()]);
+  $pdo->exec('COMMIT');
+  $tenTho = array_column(mhBarbers(), 'name', 'id')[$tho] ?? '';
+  out(['ok' => true, 'token' => $token, 'booking' => ['date' => $date, 'start' => $start, 'dur' => $dur, 'barber' => $tenTho,
+                                                       'services' => array_column($ds, 'name'), 'name' => $name]]);
+}
+
+/* Khách xem / huỷ lịch của mình bằng mã nhận lúc đặt. */
+case 'pub_booking': {
+  $tk = (string)inp('token', '');
+  if (!preg_match('/^[0-9a-f]{32}$/', $tk)) out(['ok' => false, 'error' => 'Link không đúng.'], 404);
+  $st = db()->prepare('SELECT * FROM bookings WHERE token_hash = ?'); $st->execute([hash('sha256', $tk)]);
+  $b = $st->fetch();
+  if (!$b) out(['ok' => false, 'error' => 'Không tìm thấy lịch hẹn.'], 404);
+  $huy = false;
+  if (inp('cancel')) {
+    if ($b['status'] !== 'booked') out(['ok' => false, 'error' => 'Lịch này không huỷ được nữa.'], 409);
+    db()->prepare("UPDATE bookings SET status = 'cancel', cancel_note = 'Khách tự huỷ', updated_at = ? WHERE id = ?")->execute([time(), $b['id']]);
+    $b['status'] = 'cancel'; $huy = true;
+  }
+  out(['ok' => true, 'cancelled' => $huy, 'booking' => ['date' => $b['book_date'], 'start' => (int)$b['start_min'], 'dur' => (int)$b['dur'],
+       'barber' => array_column(mhBarbers(), 'name', 'id')[(int)$b['barber_id']] ?? '', 'status' => $b['status'],
+       'services' => array_column(json_decode($b['services'], true) ?: [], 'name'), 'name' => $b['name']]]);
+}
+
+/* ===== sao lưu ===== */
+
+case 'backup_info': {
+  mhRequireOwner();
+  out(['ok' => true, 'last' => json_decode(mhSetting('last_backup', 'null'), true), 'files' => array_slice(mhBackupFiles(), 0, 30),
+       'mail_ready' => mhBackupMailReady(), 'locked' => defined('MH_BACKUP_PASS') && MH_BACKUP_PASS !== '',
+       'to' => defined('MH_BACKUP_TO') ? (string)MH_BACKUP_TO : '', 'zip' => class_exists('ZipArchive'),
+       'cron' => '/usr/bin/php ' . __DIR__ . '/backup.php']);
+}
+
+case 'backup_now': {
+  $u = mhRequireOwner();
+  $r = mhBackupRun((bool)inp('mail', 1));
+  mhAudit($u['id'], 'backup', ($r['ok'] ? $r['name'] : 'lỗi') . ($r['mailed'] ? ' · đã gửi mail' : '') . ($r['error'] ? ' · ' . $r['error'] : ''));
+  out(['ok' => true, 'result' => $r]);
+}
+
+/* Tải một bản sao lưu về máy — trả thẳng tệp, không phải JSON. */
+case 'backup_download': {
+  $u = mhRequireOwner();
+  $ten = basename((string)inp('name', ''));
+  $f = mhBackupDir() . '/' . $ten;
+  if (!preg_match('/^memberhub-[\d_-]+\.(zip|sqlite\.gz)$/', $ten) || !is_file($f)) out(['ok' => false, 'error' => 'Không có bản sao lưu này.'], 404);
+  mhAudit($u['id'], 'backup_download', $ten);
+  header('Content-Type: application/octet-stream');
+  header('Content-Disposition: attachment; filename="' . $ten . '"');
+  header('Content-Length: ' . filesize($f));
+  readfile($f);
+  exit;
+}
+
 case 'day': {
   $u = mhRequireUser();
   $owner = mhIsOwner($u);
@@ -950,15 +1273,16 @@ case 'services_save': {
   $giu = [];
   $pdo->prepare("INSERT INTO settings (key, value) VALUES ('svc_groups', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
       ->execute([json_encode(array_values($nhom), JSON_UNESCAPED_UNICODE)]);
-  $up  = $pdo->prepare('UPDATE services SET name=?, kind=?, price=?, kv_codes=?, active=?, sort=?, wage=?, comm_pct=?, discountable=?, grp=?, note=? WHERE id=?');
-  $ins = $pdo->prepare('INSERT INTO services (name, kind, price, kv_codes, active, sort, wage, comm_pct, discountable, grp, note) VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+  $up  = $pdo->prepare('UPDATE services SET name=?, kind=?, price=?, kv_codes=?, active=?, sort=?, wage=?, comm_pct=?, discountable=?, grp=?, note=?, duration=?, bookable=? WHERE id=?');
+  $ins = $pdo->prepare('INSERT INTO services (name, kind, price, kv_codes, active, sort, wage, comm_pct, discountable, grp, note, duration, bookable) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
   foreach (array_values($rows) as $i => $r) {
     $codes = implode(',', array_filter(array_map(function ($c) { return trim($c); },
                                                  explode(',', (string)($r['kv_codes'] ?? '')))));
     $vals = [trim((string)$r['name']), $r['kind'], max(0, (int)($r['price'] ?? 0)), $codes,
              !empty($r['active']) ? 1 : 0, $i + 1, max(0, (int)($r['wage'] ?? 0)),
              max(0, min(100, round((float)($r['comm_pct'] ?? 0), 2))), !empty($r['discountable']) ? 1 : 0,
-             isset($nhom[$r['grp'] ?? '']) ? $r['grp'] : $dauTien, mb_substr(trim((string)($r['note'] ?? '')), 0, 500)];
+             isset($nhom[$r['grp'] ?? '']) ? $r['grp'] : $dauTien, mb_substr(trim((string)($r['note'] ?? '')), 0, 500),
+             max(0, min(480, (int)($r['duration'] ?? 0))), !empty($r['bookable']) ? 1 : 0];
     if (!empty($r['id'])) { $up->execute(array_merge($vals, [(int)$r['id']])); $giu[] = (int)$r['id']; }
     else { $ins->execute($vals); $giu[] = (int)$pdo->lastInsertId(); }
   }

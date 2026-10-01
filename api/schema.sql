@@ -364,3 +364,46 @@ CREATE TABLE IF NOT EXISTS bill_reports (
 );
 CREATE INDEX IF NOT EXISTS idx_report_visit  ON bill_reports(visit_id);
 CREATE INDEX IF NOT EXISTS idx_report_status ON bill_reports(status, report_date);
+
+/* ---------------- đặt lịch ----------------
+   Giờ tính bằng phút trong ngày (9:30 = 570). Thợ "ai cũng được" thì máy
+   chủ tự chọn thợ đang trống lúc đặt, any_barber = 1 để quầy biết khách
+   không kén thợ — đổi thợ thoải mái. */
+CREATE TABLE IF NOT EXISTS bookings (
+  id          INTEGER PRIMARY KEY,
+  book_date   TEXT    NOT NULL,
+  start_min   INTEGER NOT NULL,
+  dur         INTEGER NOT NULL,
+  barber_id   INTEGER,
+  any_barber  INTEGER NOT NULL DEFAULT 0,
+  customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL,
+  name        TEXT    NOT NULL DEFAULT '',
+  phone       TEXT    NOT NULL DEFAULT '',
+  services    TEXT    NOT NULL DEFAULT '[]',     -- [{"id":1,"name":"Cắt"}]
+  note        TEXT    NOT NULL DEFAULT '',
+  status      TEXT    NOT NULL DEFAULT 'booked', -- booked | arrived | done | noshow | cancel
+  confirmed   INTEGER NOT NULL DEFAULT 1,        -- khách tự đặt: 0 tới khi quầy gọi xác nhận
+  source      TEXT    NOT NULL DEFAULT 'staff',  -- staff | online
+  visit_id    INTEGER,
+  token_hash  TEXT,                              -- mã xem / huỷ của khách tự đặt (đã băm)
+  ip          TEXT    NOT NULL DEFAULT '',
+  cancel_note TEXT    NOT NULL DEFAULT '',
+  created_at  INTEGER NOT NULL,
+  created_by  INTEGER,
+  updated_at  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_book_date  ON bookings(book_date, barber_id);
+CREATE INDEX IF NOT EXISTS idx_book_phone ON bookings(phone, status);
+
+/* Thợ nghỉ cả ngày (0 → 1440) hoặc một khúc giờ. */
+CREATE TABLE IF NOT EXISTS barber_off (
+  id          INTEGER PRIMARY KEY,
+  barber_id   INTEGER NOT NULL,
+  off_date    TEXT    NOT NULL,
+  start_min   INTEGER NOT NULL DEFAULT 0,
+  end_min     INTEGER NOT NULL DEFAULT 1440,
+  note        TEXT    NOT NULL DEFAULT '',
+  created_at  INTEGER NOT NULL,
+  created_by  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_off_date ON barber_off(off_date);

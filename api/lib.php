@@ -167,6 +167,15 @@ function mhMigrate(PDO $pdo): void {
      lời, bấm lại → nhận lại đúng hoá đơn cũ thay vì tạo hoá đơn thứ hai. */
   mhAddColumn($pdo, 'visits', 'client_ref', 'TEXT');
   $pdo->exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_visit_ref ON visits(client_ref) WHERE client_ref IS NOT NULL');
+  /* Đặt lịch: mỗi dịch vụ mất bao lâu (phút) và có cho khách tự đặt không.
+     Đặt sẵn theo lời chủ quán: cắt 45', combo 60', uốn / nhuộm 90' (sửa
+     được — uốn tuỳ tóc 1–2 tiếng thì quầy chỉnh lúc đặt). */
+  if (mhAddColumn($pdo, 'services', 'duration', 'INTEGER NOT NULL DEFAULT 0'))
+    $pdo->exec("UPDATE services SET duration = CASE
+                  WHEN kind = 'product' THEN 0 WHEN grp = 'B' THEN 60 WHEN kind = 'cut' THEN 45
+                  WHEN kind IN ('perm', 'color') THEN 90 WHEN kind = 'care' THEN 15 ELSE 30 END");
+  if (mhAddColumn($pdo, 'services', 'bookable', 'INTEGER NOT NULL DEFAULT 1'))
+    $pdo->exec("UPDATE services SET bookable = 0 WHERE kind = 'product'");
 
   if ((int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn() > 0) {
     mhSyncOwnerFromConfig($pdo);
@@ -448,7 +457,7 @@ function mhCurrentUser(): ?array {
 
 /* Tài khoản thợ chỉ được xem hoá đơn của chính mình và báo sai — mọi lệnh
    khác (tính tiền, tra khách, chốt ca…) chặn ngay ở cửa. */
-const MH_BARBER_ACTIONS = ['me', 'logout', 'my_bills', 'report_add'];
+const MH_BARBER_ACTIONS = ['me', 'logout', 'my_bills', 'report_add', 'book_mine'];
 
 function mhRequireUser(): array {
   $u = mhCurrentUser();
@@ -1043,7 +1052,7 @@ function mhPromos(bool $todayOnly): array {
 function mhServices(bool $activeOnly): array {
   $rows = db()->query('SELECT * FROM services' . ($activeOnly ? ' WHERE active = 1' : '') . ' ORDER BY sort, id')->fetchAll();
   foreach ($rows as &$s) {
-    foreach (['id', 'price', 'active', 'sort', 'wage', 'discountable'] as $k) $s[$k] = (int)$s[$k];
+    foreach (['id', 'price', 'active', 'sort', 'wage', 'discountable', 'duration', 'bookable'] as $k) $s[$k] = (int)$s[$k];
     $s['grp'] = (string)$s['grp']; $s['note'] = (string)$s['note'];
     $s['comm_pct'] = (float)$s['comm_pct'];
   }
@@ -1174,4 +1183,257 @@ function mhShiftCalc(string $date, int $opening): array {
   return ['opening' => $opening, 'cash_sales' => (int)$v['c'], 'transfer' => (int)$v['t'], 'revenue' => (int)$v['a'],
           'tips' => (int)$v['tip'], 'tips_out' => $tipsOut, 'moves' => $moves, 'bills' => (int)$v['n'],
           'expected' => $opening + (int)$v['c'] + $moves - $tipsOut];
+}
+
+
+/* ============================================================
+   Đặt lịch
+   ============================================================ */
+
+/* Cấu hình đặt lịch (settings): giờ mở / đóng cửa, bước giờ, khách được tự
+   đặt không, đặt trước tối đa mấy ngày, phải đặt trước ít nhất mấy phút,
+   những thứ trong tuần quán nghỉ (0 = CN), lời nhắn trên trang đặt lịch. */
+function mhBookCfg(): array {
+  $hm = function (string $s, int $mac) { return preg_match('/^(\d{1,2}):(\d{2})$/', $s, $m) ? (int)$m[1] * 60 + (int)$m[2] : $mac; };
+  $nghi = array_values(array_filter(array_map('intval', explode(',', mhSetting('book_closed_days', ''))),
+                                    function ($d) { return $d >= 0 && $d <= 6; }));
+  return ['open' => $hm(mhSetting('book_open', '09:00'), 540), 'close' => $hm(mhSetting('book_close', '20:00'), 1200),
+          'step' => in_array((int)mhSetting('book_step', '15'), [15, 30], true) ? (int)mhSetting('book_step', '15') : 15,
+          'online' => mhSetting('book_online', '1') === '1', 'days' => max(1, min(60, (int)mhSetting('book_days', '14'))),
+          'notice' => max(0, min(1440, (int)mhSetting('book_notice', '60'))), 'closed_days' => $nghi,
+          'msg' => mhSetting('book_msg', ''),
+          /* Khách bỏ hẹn từng này lần (180 ngày gần đây) thì không tự đặt online được nữa. */
+          'noshow_block' => max(1, (int)mhSetting('book_noshow_block', '2'))];
+}
+
+function mhNowMin(): int { return (int)date('G') * 60 + (int)date('i'); }
+
+/* Lịch bận của từng thợ trong ngày: lịch hẹn còn hiệu lực + giờ nghỉ.
+   [barber_id => [[từ, đến, booking_id|0], …]] */
+function mhBusy(string $date, int $boQua = 0): array {
+  $ra = [];
+  $st = db()->prepare("SELECT id, barber_id, start_min, dur FROM bookings
+                        WHERE book_date = ? AND status IN ('booked', 'arrived') AND barber_id IS NOT NULL AND id <> ?");
+  $st->execute([$date, $boQua]);
+  foreach ($st->fetchAll() as $b) $ra[(int)$b['barber_id']][] = [(int)$b['start_min'], (int)$b['start_min'] + (int)$b['dur'], (int)$b['id']];
+  $st = db()->prepare('SELECT barber_id, start_min, end_min FROM barber_off WHERE off_date = ?');
+  $st->execute([$date]);
+  foreach ($st->fetchAll() as $o) $ra[(int)$o['barber_id']][] = [(int)$o['start_min'], (int)$o['end_min'], 0];
+  return $ra;
+}
+
+function mhFreeAt(array $busy, int $bid, int $tu, int $den): bool {
+  foreach ($busy[$bid] ?? [] as [$a, $b]) if ($tu < $b && $a < $den) return false;
+  return true;
+}
+
+/* Giờ còn trống trong ngày cho một lần làm dài $dur phút: [[phút, [thợ trống…]], …].
+   $online: theo luật khách tự đặt (đặt trước tối thiểu, tối đa mấy ngày). */
+function mhSlots(string $date, int $dur, ?int $bid, bool $online, int $boQua = 0): array {
+  $cfg = mhBookCfg();
+  $nay = mhToday();
+  if ($date < $nay) return [];
+  if (in_array((int)date('w', strtotime($date)), $cfg['closed_days'], true)) return [];
+  if ($online && $date > date('Y-m-d', strtotime("+{$cfg['days']} days"))) return [];
+  $tho = array_column(mhBarbers(true), 'id');
+  if ($bid) $tho = in_array($bid, $tho, true) ? [$bid] : [];
+  if (!$tho) return [];
+  $busy = mhBusy($date, $boQua);
+  $tuGio = $cfg['open'];
+  if ($date === $nay) $tuGio = max($tuGio, mhNowMin() + ($online ? $cfg['notice'] : 0));
+  $ra = [];
+  $dur = max(15, $dur);
+  for ($t = $cfg['open']; $t + $dur <= $cfg['close']; $t += $cfg['step']) {
+    if ($t < $tuGio) continue;
+    $trong = array_values(array_filter($tho, function ($b) use ($busy, $t, $dur) { return mhFreeAt($busy, $b, $t, $t + $dur); }));
+    if ($trong) $ra[] = [$t, $trong];
+  }
+  return $ra;
+}
+
+/* Khách không kén thợ: chọn thợ trống, ít lịch trong ngày hơn thì ưu tiên. */
+function mhPickBarber(array $busy, array $trong): int {
+  usort($trong, function ($a, $b) use ($busy) { return count($busy[$a] ?? []) <=> count($busy[$b] ?? []); });
+  return $trong[0];
+}
+
+function mhBookRow(array $b, bool $hienSo): array {
+  return ['id' => (int)$b['id'], 'date' => $b['book_date'], 'start' => (int)$b['start_min'], 'dur' => (int)$b['dur'],
+          'barber_id' => $b['barber_id'] !== null ? (int)$b['barber_id'] : null, 'any' => (int)$b['any_barber'],
+          'customer_id' => $b['customer_id'] !== null ? (int)$b['customer_id'] : null,
+          'name' => $b['name'], 'phone' => $hienSo ? $b['phone'] : mhMask($b['phone']),
+          'services' => json_decode($b['services'], true) ?: [], 'note' => $b['note'], 'status' => $b['status'],
+          'confirmed' => (int)$b['confirmed'], 'source' => $b['source'],
+          'visit_id' => $b['visit_id'] !== null ? (int)$b['visit_id'] : null,
+          'cancel_note' => $b['cancel_note'], 'by' => $b['by_name'] ?? null, 'created_at' => (int)$b['created_at']];
+}
+
+/* Dịch vụ khách chọn → [[{id, name}], tổng phút]. Bỏ qua món không đặt được. */
+function mhBookServices($ids, bool $online): array {
+  $sv = [];
+  foreach (mhServices(true) as $s) $sv[$s['id']] = $s;
+  $ds = []; $dur = 0;
+  foreach (array_unique(array_map('intval', (array)$ids)) as $id) {
+    $s = $sv[$id] ?? null;
+    if (!$s || $s['kind'] === 'product' || ($online && !$s['bookable'])) continue;
+    $ds[] = ['id' => $s['id'], 'name' => $s['name']];
+    $dur += $s['duration'] ?: 30;
+  }
+  return [$ds, $dur];
+}
+
+/* ============================================================
+   Sao lưu
+   ============================================================
+
+   Mỗi đêm Cron Jobs của Hostinger chạy api/backup.php:
+     1. chép cơ sở dữ liệu ra một bản ổn định (VACUUM INTO — app vẫn chạy
+        bình thường trong lúc chép),
+     2. nén zip, khoá bằng mật khẩu MH_BACKUP_PASS (AES-256) — trong đó có
+        số điện thoại của cả tệp khách,
+     3. giữ 30 bản gần nhất trong memberhub-data/backups (ngoài thư mục web),
+     4. gửi vào Gmail qua SMTP bằng "Mật khẩu ứng dụng" của Google.        */
+
+const MH_BACKUP_KEEP = 30;
+
+function mhBackupDir(): string {
+  global $DB_FILE;
+  $d = dirname($DB_FILE) . '/backups';
+  if (!is_dir($d)) @mkdir($d, 0700, true);
+  if (!is_file($d . '/.htaccess')) @file_put_contents($d . '/.htaccess', "Require all denied\nOrder allow,deny\nDeny from all\n");
+  return $d;
+}
+
+function mhBackupFiles(): array {
+  $ra = [];
+  foreach (glob(mhBackupDir() . '/memberhub-*.{zip,gz}', GLOB_BRACE) ?: [] as $f)
+    $ra[] = ['name' => basename($f), 'size' => filesize($f), 'at' => filemtime($f)];
+  usort($ra, function ($a, $b) { return strcmp($b['name'], $a['name']); });
+  return $ra;
+}
+
+function mhBackupMake(): array {
+  $dir = mhBackupDir();
+  $ts = date('Y-m-d_His');
+  $tho = "$dir/memberhub-$ts.sqlite";
+  @unlink($tho);
+  db()->exec('VACUUM INTO ' . db()->quote($tho));
+  $pass = defined('MH_BACKUP_PASS') ? (string)MH_BACKUP_PASS : '';
+  if (class_exists('ZipArchive')) {
+    $f = "$dir/memberhub-$ts.zip";
+    $z = new ZipArchive();
+    if ($z->open($f, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) throw new RuntimeException('Không tạo được tệp zip.');
+    $z->addFile($tho, "memberhub-$ts.sqlite");
+    if ($pass !== '') {
+      $z->setPassword($pass);
+      if (!$z->setEncryptionName("memberhub-$ts.sqlite", ZipArchive::EM_AES_256)) throw new RuntimeException('Máy chủ không khoá được tệp zip.');
+    }
+    $z->close();
+  } else {
+    if ($pass !== '') throw new RuntimeException('Máy chủ thiếu ZipArchive — không khoá được tệp sao lưu.');
+    $f = "$dir/memberhub-$ts.sqlite.gz";
+    file_put_contents($f, gzencode((string)file_get_contents($tho), 9));
+  }
+  @unlink($tho);
+  $ds = mhBackupFiles();
+  foreach (array_slice($ds, MH_BACKUP_KEEP) as $cu) @unlink($dir . '/' . $cu['name']);
+  return ['path' => $f, 'name' => basename($f), 'size' => filesize($f), 'locked' => $pass !== ''];
+}
+
+function mhBackupMailReady(): bool {
+  return defined('MH_BACKUP_TO') && MH_BACKUP_TO !== '' && defined('MH_SMTP_USER') && MH_SMTP_USER !== ''
+      && defined('MH_SMTP_PASS') && MH_SMTP_PASS !== '';
+}
+
+/* Sao lưu + gửi mail. Ghi kết quả vào settings.last_backup để màn Thiết
+   lập và Tổng quan báo cho chủ biết đêm qua có chạy không. */
+function mhBackupRun(bool $mail): array {
+  $kq = ['at' => time(), 'ok' => false, 'name' => '', 'size' => 0, 'mailed' => false, 'error' => ''];
+  try {
+    $b = mhBackupMake();
+    $kq = array_merge($kq, ['ok' => true, 'name' => $b['name'], 'size' => $b['size'], 'locked' => $b['locked']]);
+    if ($mail && mhBackupMailReady()) {
+      if (!$b['locked']) throw new RuntimeException('Chưa đặt MH_BACKUP_PASS — không gửi tệp chưa khoá ra ngoài.');
+      if ($b['size'] > 20 * 1024 * 1024) throw new RuntimeException('Tệp sao lưu lớn quá 20MB, Gmail không nhận.');
+      $shop = defined('MH_SHOP_NAME') ? MH_SHOP_NAME : 'Hội viên';
+      mhSmtpSend((string)MH_BACKUP_TO, "[$shop] Sao lưu dữ liệu " . date('d/m/Y'),
+        "Bản sao lưu tự động của app $shop lúc " . date('H:i d/m/Y') . ".\n\n"
+        . "Tệp: {$b['name']} (" . number_format($b['size'] / 1024, 0, ',', '.') . " KB), khoá bằng mật khẩu sao lưu.\n"
+        . "Giữ thư này — khi cần khôi phục, gửi tệp cho người cài app.\n", $b['path']);
+      $kq['mailed'] = true;
+    }
+  } catch (Throwable $e) {
+    $kq['error'] = $e->getMessage();
+  }
+  db()->prepare("INSERT INTO settings (key, value) VALUES ('last_backup', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      ->execute([json_encode($kq, JSON_UNESCAPED_UNICODE)]);
+  return $kq;
+}
+
+/* Gửi mail qua SMTP (Gmail: smtp.gmail.com cổng 465, đăng nhập bằng Mật
+   khẩu ứng dụng 16 chữ). Viết tay cho khỏi kéo thư viện về hosting. */
+function mhSmtpSend(string $to, string $subject, string $text, ?string $file = null): void {
+  $host = defined('MH_SMTP_HOST') ? MH_SMTP_HOST : 'smtp.gmail.com';
+  $port = defined('MH_SMTP_PORT') ? (int)MH_SMTP_PORT : 465;
+  $user = (string)MH_SMTP_USER;
+  $pass = str_replace(' ', '', (string)MH_SMTP_PASS);
+  $nhan = array_values(array_filter(array_map('trim', explode(',', $to))));
+  if (!$nhan) throw new RuntimeException('Chưa có địa chỉ nhận.');
+
+  $fp = @stream_socket_client(($port === 465 ? 'ssl://' : 'tcp://') . "$host:$port", $eno, $estr, 20);
+  if (!$fp) throw new RuntimeException("Không nối được tới $host:$port ($estr).");
+  stream_set_timeout($fp, 30);
+  $doc = function () use ($fp) {
+    $s = '';
+    while (($l = fgets($fp, 1024)) !== false) { $s .= $l; if (strlen($l) < 4 || $l[3] === ' ') break; }
+    return $s;
+  };
+  $lenh = function (?string $c, array $mong) use ($fp, $doc) {
+    if ($c !== null) fwrite($fp, $c . "\r\n");
+    $r = $doc();
+    if (!in_array((int)substr($r, 0, 3), $mong, true))
+      throw new RuntimeException('Máy chủ thư trả lời: ' . trim(preg_replace('/\s+/', ' ', $r)));
+    return $r;
+  };
+  try {
+    $lenh(null, [220]);
+    $lenh('EHLO memberhub', [250]);
+    if ($port !== 465) {
+      $lenh('STARTTLS', [220]);
+      if (!stream_socket_enable_crypto($fp, true, STREAM_CRYPTO_METHOD_TLS_CLIENT)) throw new RuntimeException('Không bật được TLS.');
+      $lenh('EHLO memberhub', [250]);
+    }
+    $lenh('AUTH LOGIN', [334]);
+    $lenh(base64_encode($user), [334]);
+    try { $lenh(base64_encode($pass), [235]); }
+    catch (RuntimeException $e) {
+      throw new RuntimeException('Gmail không nhận mật khẩu — phải dùng "Mật khẩu ứng dụng" 16 chữ, không phải mật khẩu Gmail. ' . $e->getMessage());
+    }
+    $lenh("MAIL FROM:<$user>", [250]);
+    foreach ($nhan as $n) $lenh("RCPT TO:<$n>", [250, 251]);
+    $lenh('DATA', [354]);
+    $ranh = 'mh' . bin2hex(random_bytes(8));
+    $h = 'From: ' . '=?UTF-8?B?' . base64_encode(defined('MH_SHOP_NAME') ? MH_SHOP_NAME : 'Hoi vien') . "?= <$user>\r\n"
+       . 'To: ' . implode(', ', $nhan) . "\r\n"
+       . 'Subject: =?UTF-8?B?' . base64_encode($subject) . "?=\r\n"
+       . 'Date: ' . date('r') . "\r\n"
+       . 'Message-ID: <' . bin2hex(random_bytes(12)) . '@memberhub>' . "\r\n"
+       . "MIME-Version: 1.0\r\n"
+       . "Content-Type: multipart/mixed; boundary=\"$ranh\"\r\n\r\n"
+       . "--$ranh\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+       . chunk_split(base64_encode($text)) . "\r\n";
+    if ($file !== null) {
+      $ten = basename($file);
+      $h .= "--$ranh\r\nContent-Type: application/octet-stream; name=\"$ten\"\r\nContent-Transfer-Encoding: base64\r\n"
+          . "Content-Disposition: attachment; filename=\"$ten\"\r\n\r\n"
+          . chunk_split(base64_encode((string)file_get_contents($file)));
+    }
+    $h .= "--$ranh--\r\n";
+    /* base64 không bao giờ có dòng bắt đầu bằng dấu chấm — khỏi phải độn. */
+    fwrite($fp, $h . "\r\n.\r\n");
+    $lenh(null, [250]);
+    @fwrite($fp, "QUIT\r\n");
+  } finally {
+    fclose($fp);
+  }
 }
