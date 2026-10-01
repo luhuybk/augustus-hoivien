@@ -198,9 +198,11 @@ const App = {
         break;
       case 'programEdit': view.innerHTML = Views.programEdit(this.data.prog); break;
       case 'tiers': {
-        const [t, all] = await Promise.all([API.call('tiers'), API.call('customers_all')]);
+        const [t, all, sv] = await Promise.all([API.call('tiers'), API.call('customers_all'), API.call('services')]);
         this.data.tierEdit = t.rows.map(x => Object.assign({}, x));
         this.data.all = all.rows;
+        this.data.round = t.round;
+        this.data.svcRef = sv.rows.filter(x => x.active && x.price > 0 && x.discountable);
         this.drawTiers();
         break;
       }
@@ -234,11 +236,13 @@ const App = {
      chênh lệch ngay, không vẽ lại (bàn phím điện thoại khỏi sập). */
   shiftLive(){
     const d = this.data.day, ui = this.shiftUi;
-    if (!d || !$('#shExp')) return;
+    if (!d || !$('#shCount')) return;          // đã chốt: chỉ xem, không tính lại
     const n = v => Number(String(v == null ? '' : v).replace(/\D/g, '')) || 0;
     const mo = ui.opening != null ? n(ui.opening) : d.shift.opening;
     const exp = mo + d.shift.cash_sales + d.shift.moves - d.shift.tips_out;
-    $('#shExp').textContent = tien(exp);
+    $('#shExp').innerHTML = tien(exp) + '<small>phải có trong tủ</small>';
+    $('#shOpenF').innerHTML = tien(mo) + '<small>đầu ca</small>';
+    $('#shOut').textContent = ui.counted ? tien(n(ui.counted) - n(ui.keep)) : '—';
     const box = $('#shDiff');
     if (ui.counted == null || ui.counted === ''){ box.className = 'diffbox'; box.textContent = 'Đếm tiền trong tủ rồi nhập vào ô trên.'; return; }
     const lech = n(ui.counted) - exp;
@@ -280,7 +284,18 @@ const App = {
       chon.forEach((i, k) => { const d = k === chon.length - 1 ? tong - co : Math.floor(tong * gross[i] / sum); ra[i] = d; co += d; });
       return ra;
     };
-    const pct = p => { const ra = {}; elig.forEach(i => ra[i] = Math.round(gross[i] * p / 100000) * 1000); return ra; };
+    /* Giảm % → làm tròn giá sau giảm của từng món (xuống 5k / 10k…). */
+    const [buoc, kieu] = this.posData.round || [1000, 'down'];
+    const pct = p => {
+      const ra = {};
+      elig.forEach(i => {
+        const u = lines[i].unit;
+        let con = u - Math.round(u * p / 100000) * 1000;
+        con = kieu === 'near' ? Math.round(con / buoc) * buoc : Math.floor(con / buoc) * buoc;
+        ra[i] = (u - Math.max(0, Math.min(u, con))) * lines[i].qty;
+      });
+      return ra;
+    };
     const tong = o => Object.values(o).reduce((a, b) => a + b, 0);
     const t = st.cus && !st.cus.walkin && st.cus.tier ? st.cus.tier : null;
     const tierPct = t ? t.disc_pct || 0 : 0;
@@ -420,6 +435,18 @@ const App = {
 
   printPayroll(){
     const d = this.data.payroll;
+    const t = d.rows.find(x => x.id === this.pay.open);
+    const css = `body{font:13px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:16px;color:#000}
+      table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:5px 8px;text-align:left}.r{text-align:right}
+      .sec td{background:#eee;font-weight:700}.tot td{font-weight:700}.net td{font-weight:800;font-size:15px;background:#f6f0e0}
+      .badge,button{display:none}.dim{color:#555}h1{font-size:18px}`;
+    if (t){
+      return this.printHtml(`<!doctype html><html><head><meta charset="utf-8"><title>Phiếu lương ${esc(t.name)}</title><style>${css}</style></head><body>
+        <h1>${esc(this.shop)} — Phiếu lương ${esc(t.name)} · tháng ${esc(d.month.slice(5))}/${esc(d.month.slice(0, 4))}</h1>
+        <p>${d.closed ? 'Đã chốt ' + new Date(d.closed.at * 1000).toLocaleString('vi-VN') : 'Tạm tính — chưa chốt'}</p>
+        ${Views.paySheet(t, true)}
+        <p style="margin-top:30px;display:flex;justify-content:space-around"><span>Người nhận</span><span>Chủ quán</span></p></body></html>`);
+    }
     const dong = d.rows.map(t => `<tr><td>${esc(t.name)}</td><td>${t.bills}</td><td>${tien(t.base)}</td><td>${tien(t.wage)}</td>
       <td>${tien(t.comm)}</td><td>${d.tip_included ? tien(t.tip) : '—'}</td><td>${t.adj ? tien(t.adj) : ''}</td><td><b>${tien(t.total)}</b></td></tr>
       ${t.adjust.map(a => `<tr class="s"><td colspan="7">· ${esc(a.label)}</td><td>${tien(a.amount)}</td></tr>`).join('')}`).join('');
@@ -466,7 +493,9 @@ const App = {
   },
 
   drawTiers(){
-    $('#view').innerHTML = Views.tiers(this.data.tierEdit, this.tierCounts());
+    const y = window.scrollY;
+    $('#view').innerHTML = Views.tiers(this.data.tierEdit, this.tierCounts(), this.data.round, this.data.svcRef);
+    window.scrollTo(0, y);
   },
 
   /* ---------------- tra cứu ---------------- */
@@ -615,7 +644,7 @@ const App = {
 
         /* ----- lương ----- */
         case 'payOpen':
-          this.pay.open = this.pay.open === id ? 0 : id;
+          this.pay.open = id;
           $('#view').innerHTML = Views.payroll(this.data.payroll, this.pay);
           return;
         case 'payAdjDel': {
@@ -1022,9 +1051,12 @@ const App = {
     if (t.id === 'kvFile' && t.files.length) return this.importFiles(t.files);
     if (t.id === 'dayPick'){ this.cur.date = t.value; return this.render(); }
     if (t.id === 'payMonth' && t.value){ this.cur.month = t.value; this.pay.open = 0; return this.render(); }
-    if (t.id === 'payTip'){
-      return API.call('setting_save', {key: 'payroll_tip', value: t.checked ? 1 : 0})
-        .then(() => this.render()).catch(e => toast(e.message, 'bad'));
+    if (t.id === 'roundStep' || t.id === 'roundMode'){
+      return API.call('setting_save', {key: t.id === 'roundStep' ? 'disc_round' : 'disc_round_mode', value: t.value})
+        .then(r => { this.data.round = [t.id === 'roundStep' ? Number(t.value) : this.data.round[0],
+                                        t.id === 'roundMode' ? t.value : this.data.round[1]];
+                     toast('Đã lưu cách làm tròn', 'ok'); this.drawTiers(); })
+        .catch(e => toast(e.message, 'bad'));
     }
     if (t.id === 'posPromo'){ this.pos.promo = Number(t.value); return this.drawPos(); }
     if (t.id === 'posDate'){ this.pos.date = t.value; return; }
@@ -1045,6 +1077,7 @@ const App = {
     } else if (t.dataset.tier){
       const row = this.data.tierEdit[Number(t.dataset.tier)];
       row[t.dataset.f] = /^min_|^disc_pct$/.test(t.dataset.f) ? Number(String(val).replace(/\D/g, '')) || 0 : val;
+      if (t.dataset.f === 'disc_pct'){ const b = $('#tierPreview'); if (b) b.innerHTML = Views.tierPreview(this.data.tierEdit, this.data.round, this.data.svcRef); }
       if (/^min_/.test(t.dataset.f)){
         const dem = this.tierCounts();
         dem.forEach((n, i) => { const b = document.getElementById('tc' + i); if (b) b.textContent = n + ' khách'; });

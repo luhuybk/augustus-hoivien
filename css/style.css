@@ -322,8 +322,7 @@ button.tcard:hover{background:var(--bg3)}
 .kett .row{padding:3px 0}
 .kett b{font-size:16px}
 .tbl tbody tr.on{background:rgba(214,165,74,.12)}
-.adjform{display:grid;grid-template-columns:minmax(160px,1fr) 150px 70px 140px auto auto;gap:8px;align-items:center}
-@media (max-width:760px){ .adjform{grid-template-columns:1fr 1fr} }
+.adjform{display:grid;gap:8px}
 @media (min-width:900px){
   .poswrap{max-width:1180px}
   .posgrid{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:14px;align-items:start}
@@ -368,5 +367,48 @@ button.tcard:hover{background:var(--bg3)}
 .diffbox.ok{background:rgba(79,211,154,.14);color:var(--ok)}
 .diffbox.bad{background:rgba(255,107,107,.14);color:var(--bad)}
 .moves .row{border-bottom:1px solid var(--line)}
-.moveform{display:grid;grid-template-columns:1fr 110px 130px auto;gap:8px;margin-top:8px}
+.moveform{display:grid;grid-template-columns:110px 1fr 120px auto;gap:8px;margin-top:8px}
 @media (max-width:600px){ .moveform{grid-template-columns:1fr 1fr} }
+
+/* ---------------- bảng kiểu Excel ---------------- */
+.tbl.xl{font-size:13.5px}
+.tbl.xl th,.tbl.xl td{border:1px solid var(--line);padding:7px 10px}
+.tbl.xl tr.sec td{background:var(--bg3);font-weight:700;font-size:12.5px;letter-spacing:.2px;color:var(--acc);text-transform:uppercase}
+.tbl.xl tr.tot td{font-weight:700;background:rgba(214,165,74,.06)}
+.tbl.xl tr.net td{font-weight:800;font-size:15.5px;background:rgba(214,165,74,.16);color:var(--acc)}
+.tbl.xl td.bad,.tbl td.bad{color:var(--bad)}
+.tbl.sheet tbody tr{cursor:default}
+.tbl.sheet td:first-child{white-space:normal}
+
+/* ---------------- lương: tab mỗi thợ ---------------- */
+.paywrap{max-width:1180px}
+.ptabs{display:flex;gap:4px;border-bottom:2px solid var(--line);margin:4px 0 14px;overflow-x:auto;scrollbar-width:none}
+.ptabs button{padding:10px 16px;border-radius:10px 10px 0 0;font-weight:600;color:var(--tx2);white-space:nowrap;
+  border:1px solid transparent;border-bottom:0;margin-bottom:-2px;display:flex;flex-direction:column;align-items:flex-start;line-height:1.25}
+.ptabs button small{font-size:11.5px;color:var(--tx3);font-weight:500}
+.ptabs button.on{background:var(--bg2);border-color:var(--line);color:var(--acc);box-shadow:0 2px 0 var(--bg2)}
+.paygrid > div{min-width:0}
+.kpi{margin-bottom:8px}
+@media (min-width:1000px){ .paygrid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:12px;align-items:start} }
+
+/* ---------------- chốt ca: 4 khung ---------------- */
+.mods{display:grid;gap:12px;margin-bottom:12px}
+.mods > div{min-width:0}
+@media (min-width:900px){ .mods{grid-template-columns:repeat(2,minmax(0,1fr))} .mod.wide{grid-column:1 / -1}
+  .mod3{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px} }
+.mod{background:var(--bg2);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px}
+.mod.ok{border-color:var(--ok)} .mod.lech{border-color:var(--bad)}
+.mh{display:flex;align-items:center;gap:8px;font-weight:700;margin-bottom:12px}
+.mh i{display:grid;place-items:center;width:24px;height:24px;border-radius:99px;font-style:normal;font-size:13px;
+  background:var(--acc);color:var(--acc-tx);flex:none}
+.mv{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+.inp.big{font-size:20px;font-weight:700;padding:10px 12px;margin-bottom:6px}
+.ln{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--line)}
+.ln.sub{font-size:13px;color:var(--tx2);border-bottom:0;padding:3px 0}
+.ln.tot{border-top:1px dashed var(--line);border-bottom:0;margin-top:6px;padding-top:9px}
+.mod .tbl.xl{margin:6px 0}
+.formula{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:12px;border-radius:12px;background:var(--bg3)}
+.formula span{display:flex;flex-direction:column;font-weight:700;font-size:17px}
+.formula small{font-size:11.5px;font-weight:500;color:var(--tx3)}
+.formula em{font-style:normal;color:var(--tx3);font-size:18px}
+.formula .eq{color:var(--acc);font-size:21px}

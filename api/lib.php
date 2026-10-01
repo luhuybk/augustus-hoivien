@@ -897,9 +897,19 @@ function mhBillCode(array $v): string {
 
    $lines: [['svc' => dòng services, 'qty' => n, 'unit' => đơn giá]]
    Giảm theo hạng và khuyến mãi KHÔNG cộng dồn — lấy mức lớn hơn. Cả hai
-   chỉ áp lên dòng được giảm (services.discountable). Mỗi dòng giảm tròn
-   nghìn đồng. $extra: chủ giảm thêm bằng tay, chia đều theo tỉ lệ mọi dòng. */
-function mhQuote(array $lines, int $tierPct, string $tierName, ?array $promo, int $extra = 0): array {
+   chỉ áp lên dòng được giảm (services.discountable). $extra: chủ giảm thêm
+   bằng tay, chia đều theo tỉ lệ mọi dòng.
+
+   Giảm theo % thì làm tròn GIÁ SAU GIẢM của từng món theo bước chủ chọn
+   ($round = 5000 / 10000, $mode 'down' = xuống, có lợi cho khách; 'near'
+   = gần nhất): cắt 170k hạng Đồng −5% = 161.500 → 160.000. */
+function mhRoundCfg(): array {
+  $b = (int)mhSetting('disc_round', '5000');
+  return [in_array($b, [1000, 5000, 10000], true) ? $b : 1000, mhSetting('disc_round_mode', 'down') === 'near' ? 'near' : 'down'];
+}
+
+function mhQuote(array $lines, int $tierPct, string $tierName, ?array $promo, int $extra = 0, ?array $round = null): array {
+  [$buoc, $kieu] = $round ?? mhRoundCfg();
   $gross = []; $elig = 0;
   foreach ($lines as $i => $l) {
     $gross[$i] = $l['unit'] * $l['qty'];
@@ -920,9 +930,14 @@ function mhQuote(array $lines, int $tierPct, string $tierName, ?array $promo, in
   };
   $eligIdx = array_keys(array_filter($lines, function ($l) { return (int)$l['svc']['discountable'] === 1; }));
 
-  $pct = function (int $p) use ($eligIdx, $gross) {
+  $pct = function (int $p) use ($eligIdx, $lines, $buoc, $kieu) {
     $ra = [];
-    foreach ($eligIdx as $i) $ra[$i] = (int)round($gross[$i] * $p / 100000) * 1000;
+    foreach ($eligIdx as $i) {
+      $u = $lines[$i]['unit'];
+      $con = $u - (int)round($u * $p / 100000) * 1000;
+      $con = $kieu === 'near' ? (int)round($con / $buoc) * $buoc : intdiv($con, $buoc) * $buoc;
+      $ra[$i] = ($u - max(0, min($u, $con))) * $lines[$i]['qty'];
+    }
     return $ra;
   };
   $tier = $tierPct > 0 ? $pct($tierPct) : [];
@@ -995,7 +1010,7 @@ function mhServices(bool $activeOnly): array {
 
    Tip: mặc định trả thợ CUỐI NGÀY từ két (đúng như file chốt ca của quán)
    — khi đó chốt ca trừ tip ra, lương tháng không cộng nữa. */
-function mhTipMonthly(): bool { return mhSetting('payroll_tip', '0') === '1'; }
+function mhTipMonthly(): bool { return false; }     // quán trả tip trong ngày từ két — lương tháng không cộng
 
 /* KPI của tháng; chưa đặt thì lấy tháng gần nhất trước đó. */
 function mhKpi(string $month): array {

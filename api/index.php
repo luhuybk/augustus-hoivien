@@ -340,7 +340,7 @@ case 'pos_init': {
        'barbers' => array_map(function ($b) { return ['id' => $b['id'], 'name' => $b['name']]; }, mhBarbers(true)),
        'promos' => array_map(function ($p) { return ['id' => $p['id'], 'name' => $p['name'], 'kind' => $p['kind'], 'value' => $p['value']]; },
                              mhPromos(true)),
-       'groups' => mhGroups(), 'today' => mhToday()]);
+       'groups' => mhGroups(), 'round' => mhRoundCfg(), 'today' => mhToday()]);
 }
 
 /* Tạo hoá đơn. Giá, giảm giá đều tính lại ở máy chủ từ bảng dịch vụ —
@@ -801,7 +801,7 @@ case 'services_save': {
 
 case 'tiers': {
   mhRequireUser();
-  out(['ok' => true, 'rows' => mhTiers()]);
+  out(['ok' => true, 'rows' => mhTiers(), 'round' => mhRoundCfg()]);
 }
 
 case 'tiers_save': {
@@ -1355,8 +1355,10 @@ case 'payroll_reopen': {
 case 'setting_save': {
   $u = mhRequireOwner();
   $k = (string)inp('key', '');
-  if (!in_array($k, ['payroll_tip'], true)) out(['ok' => false, 'error' => 'Không có mục này.'], 400);
-  $v = inp('value') ? '1' : '0';
+  $hop = ['disc_round' => ['1000', '5000', '10000'], 'disc_round_mode' => ['down', 'near']];
+  if (!isset($hop[$k])) out(['ok' => false, 'error' => 'Không có mục này.'], 400);
+  $v = (string)inp('value', '');
+  if (!in_array($v, $hop[$k], true)) out(['ok' => false, 'error' => 'Giá trị không hợp lệ.'], 400);
   db()->prepare('INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')->execute([$k, $v]);
   mhAudit($u['id'], 'setting_save', "$k = $v");
   out(['ok' => true]);
