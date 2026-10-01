@@ -29,6 +29,7 @@ const App = {
   posData: {},
   pos: null,              /* hoá đơn đang lập — giữ nguyên khi chuyển tab qua lại */
   pay: {open: 0},
+  bills: {preset: 'today', from: '', to: '', q: '', barber: '', only: '', pay: '', src: '', limit: 200},
 
   get cur(){ return this.stack[this.stack.length - 1]; },
 
@@ -85,7 +86,7 @@ const App = {
 
   tabs(){
     return API.isOwner()
-      ? [['pos', '💳', 'Bán hàng'], ['customers', '👥', 'Khách'], ['day', '📋', 'Sổ ngày'],
+      ? [['pos', '💳', 'Bán hàng'], ['customers', '👥', 'Khách'], ['day', '📋', 'Sổ ngày'], ['bills', '🧾', 'Hoá đơn'],
          ['dash', '📊', 'Tổng quan'], ['payroll', '💰', 'Lương'], ['more', '⚙︎', 'Thiết lập']]
       : [['pos', '💳', 'Bán hàng'], ['lookup', '🔎', 'Tra khách'], ['day', '📋', 'Báo cáo'], ['more', '☰', 'Khác']];
   },
@@ -147,6 +148,13 @@ const App = {
       case 'payroll': {
         this.data.payroll = await API.call('payroll', {month: s.month || (this.today || '').slice(0, 7)});
         view.innerHTML = Views.payroll(this.data.payroll, this.pay);
+        break;
+      }
+      case 'bills': {
+        if (!this.barbers) this.barbers = (await API.call('barbers')).rows.filter(b => b.active);
+        if (!this.bills.from) this.billsPreset('today');
+        this.data.bills = await this.billsFetch();
+        view.innerHTML = Views.bills(this.bills, this.data.bills);
         break;
       }
       case 'promos':
@@ -261,7 +269,7 @@ const App = {
 
   posReset(){
     this.pos = {cus: null, q: '', rows: null, err: '', newCus: false, newPhone: '',
-                barber: null, lines: [], promo: 0, tip: '', extra: '', pay: '', given: '', cashPart: '',
+                barber: null, lines: [], promo: 0, tip: '', mdReason: '', pay: '', given: '', cashPart: '',
                 note: '', date: this.today, done: null};
   },
 
@@ -271,10 +279,12 @@ const App = {
     const st = this.pos, sv = this.posData.services || [];
     const lines = st.lines.map(l => {
       const s = sv.find(x => x.id === l.sid) || {price: 0, discountable: 0};
-      return {svc: s, qty: l.qty, unit: s.price || Number(l.price) || 0};
+      return {svc: s, qty: l.qty, unit: s.price || Number(l.price) || 0,
+              mdisc: l.mdOpen ? Number(String(l.mdisc || '').replace(/\D/g, '')) || 0 : 0};
     });
     const gross = lines.map(l => l.unit * l.qty);
-    const elig = lines.map((l, i) => l.svc.discountable ? i : -1).filter(i => i >= 0);
+    /* Món giảm thêm tay thì bỏ qua hạng / khuyến mãi. */
+    const elig = lines.map((l, i) => l.svc.discountable && !l.mdisc ? i : -1).filter(i => i >= 0);
     const chia = (tong, chon) => {
       const ra = {};
       const sum = chon.reduce((a, i) => a + gross[i], 0);
@@ -306,20 +316,10 @@ const App = {
     const dung = laKm ? pro : tier;
     let note = tong(dung) > 0 ? (laKm ? 'KM: ' + promo.name : 'Hạng ' + t.name + ' −' + tierPct + '%') : '';
     const disc = lines.map((l, i) => Math.min(gross[i], dung[i] || 0));
-    let extra = API.isOwner() ? Number(String(st.extra).replace(/\D/g, '')) || 0 : 0;
-    if (extra > 0 && lines.length){
-      const con = lines.map((l, i) => gross[i] - disc[i]);
-      const tc = con.reduce((a, b) => a + b, 0);
-      extra = Math.min(extra, tc);
-      let co = 0;
-      lines.forEach((l, i) => {
-        let d = i === lines.length - 1 ? extra - co : (tc ? Math.floor(extra * con[i] / tc) : 0);
-        d = Math.min(d, con[i]);
-        disc[i] += d; co += d;
-      });
-      note = (note ? note + ' · ' : '') + 'Chủ giảm thêm';
-    }
-    const ra = {lines: lines.map((l, i) => ({net: gross[i] - disc[i], disc: disc[i]})), note,
+    const tay = lines.map((l, i) => Math.min(gross[i], l.mdisc));
+    tay.forEach((d, i) => { if (d > 0) disc[i] = d; });
+    const ra = {lines: lines.map((l, i) => ({net: gross[i] - disc[i], disc: disc[i], mdisc: tay[i]})), note,
+                mdisc: tay.reduce((a, b) => a + b, 0),
                 subtotal: gross.reduce((a, b) => a + b, 0), discount: disc.reduce((a, b) => a + b, 0)};
     ra.total = ra.subtotal - ra.discount;
     return ra;
@@ -351,9 +351,10 @@ const App = {
     set('#posSub', tien(q.subtotal));
     q.lines.forEach((l, i) => { set('#pnet' + i, tien(l.net)); set('#pdisc' + i, l.disc ? ' · −' + tienGon(l.disc) : ''); });
     const dr = $('#posDiscRow');
-    if (dr) dr.style.display = q.discount ? '' : 'none';
+    if (dr) dr.style.display = q.discount - q.mdisc ? '' : 'none';
     set('#posDiscNote', 'Giảm · ' + esc(q.note));
-    set('#posDiscAmt', '−' + tien(q.discount));
+    set('#posDiscAmt', '−' + tien(q.discount - q.mdisc));
+    set('#posMdAmt', '−' + tien(q.mdisc));
     set('#posChange', Views.posChange(st, tong));
     set('#posCkPart', tien(Math.max(0, tong - st.cashPartN)));
     const nut = document.querySelector('[data-act="posCheckout"]');
@@ -402,8 +403,8 @@ const App = {
     const r = await API.call('bill_create', {
       customer_id: st.cus && !st.cus.walkin ? st.cus.id : 0,
       barber_id: st.barber || 0,
-      items: st.lines.map(l => ({service_id: l.sid, qty: l.qty, price: Number(l.price) || undefined})),
-      promo_id: st.promo || 0, extra: API.isOwner() ? Number(String(st.extra).replace(/\D/g, '')) || 0 : 0,
+      items: st.lines.map((l, i) => ({service_id: l.sid, qty: l.qty, price: Number(l.price) || undefined, mdisc: q.lines[i].mdisc})),
+      promo_id: st.promo || 0, mdisc_reason: st.mdReason,
       tip: st.tipN, pay_cash: cash, pay_transfer: tong - cash, note: st.note,
       expect_total: q.total, date: API.isOwner() ? st.date : undefined});
     st.done = r;
@@ -427,8 +428,42 @@ const App = {
     setTimeout(() => { f.contentWindow.focus(); f.contentWindow.print(); }, 250);
   },
 
+  /* Sổ hoá đơn: khoảng ngày nhanh, và hỏi máy chủ theo bộ lọc đang chọn. */
+  billsPreset(k){
+    const d = new Date(this.today + 'T00:00:00');
+    const iso = x => x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0');
+    const lui = n => { const x = new Date(d); x.setDate(x.getDate() - n); return iso(x); };
+    const b = this.bills;
+    b.preset = k; b.limit = 200;
+    if (k === 'today'){ b.from = b.to = this.today; }
+    else if (k === 'yday'){ b.from = b.to = lui(1); }
+    else if (k === '7d'){ b.from = lui(6); b.to = this.today; }
+    else if (k === 'month'){ b.from = this.today.slice(0, 8) + '01'; b.to = this.today; }
+    else if (k === 'pmonth'){
+      const x = new Date(d.getFullYear(), d.getMonth(), 0);
+      b.from = iso(x).slice(0, 8) + '01'; b.to = iso(x);
+    }
+  },
+
+  billsFetch(){
+    const b = this.bills;
+    return API.call('bills', {from: b.from, to: b.to, q: b.q, barber: b.barber, only: b.only, pay: b.pay, src: b.src, limit: b.limit});
+  },
+
+  /* Đổi bộ lọc: chỉ vẽ lại phần danh sách — ô tìm đang gõ giữ nguyên. */
+  async billsReload(full){
+    const luot = this._lb = (this._lb || 0) + 1;
+    try{
+      const d = await this.billsFetch();
+      if (luot !== this._lb || this.cur.name !== 'bills') return;
+      this.data.bills = d;
+      if (full) $('#view').innerHTML = Views.bills(this.bills, d);
+      else { const b = $('#billsBody'); if (b) b.innerHTML = Views.billsBody(d); }
+    }catch(e){ toast(e.message, 'bad'); }
+  },
+
   findBill(id){
-    const ds = [].concat(this.pos && this.pos.done ? [this.pos.done.bill] : [],
+    const ds = [].concat(this.pos && this.pos.done ? [this.pos.done.bill] : [], (this.data.bills || {}).rows || [],
                          (this.data.day || {}).visits || [], (this.data.card || {}).visits || []);
     return ds.find(v => v.id === id);
   },
@@ -438,7 +473,7 @@ const App = {
     const t = d.rows.find(x => x.id === this.pay.open);
     const css = `body{font:13px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:16px;color:#000}
       table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:5px 8px;text-align:left}.r{text-align:right}
-      .sec td{background:#eee;font-weight:700}.tot td{font-weight:700}.net td{font-weight:800;font-size:15px;background:#f6f0e0}
+      .sec td{background:#eee;font-weight:700}.tot td{font-weight:700}.net td{font-weight:800;font-size:15px;background:#f6f0e0}.gap td{border:0;height:14px;padding:0}
       .badge,button{display:none}.dim{color:#555}h1{font-size:18px}`;
     if (t){
       return this.printHtml(`<!doctype html><html><head><meta charset="utf-8"><title>Phiếu lương ${esc(t.name)}</title><style>${css}</style></head><body>
@@ -613,6 +648,25 @@ const App = {
           else this.pos.lines.push({sid: id, qty: 1, price: 0});
           this.drawPos();
           if (s && !s.price){ const ps = document.querySelectorAll('[data-pprice]'); if (ps.length) ps[ps.length - 1].focus(); }
+          return;
+        }
+        case 'billsPreset':
+          this.billsPreset(el.dataset.k);
+          return this.billsReload(true);
+        case 'billsMore': {
+          this.bills.limit += 300;
+          const y = window.scrollY;
+          await this.billsReload(false);
+          window.scrollTo(0, y);
+          return;
+        }
+        /* Giảm thêm tay một món: mở ô nhập số tiền giảm; bấm × là bỏ. */
+        case 'posMd': {
+          const i = Number(el.dataset.i), l = this.pos.lines[i];
+          l.mdOpen = !l.mdOpen;
+          if (!l.mdOpen) l.mdisc = '';
+          this.drawPos();
+          if (l.mdOpen){ const o = document.getElementById('posMd' + i); if (o) o.focus(); }
           return;
         }
         case 'posQty': {
@@ -1009,6 +1063,12 @@ const App = {
       }, 300);
       return;
     }
+    if (t.id === 'bQ'){
+      this.bills.q = t.value; this.bills.limit = 200;
+      clearTimeout(this._tb);
+      this._tb = setTimeout(() => this.billsReload(false), 350);
+      return;
+    }
     if (t.id === 'cusQ'){
       this.cus.q = t.value; this.cus.limit = 100;
       clearTimeout(this._tc);
@@ -1039,7 +1099,8 @@ const App = {
         /* Giá đổi thì giảm giá và thành tiền từng dòng đổi theo — vẽ lại khi
            rời ô (change), lúc đang gõ chỉ cập nhật tổng. */
       }
-      const k = {posTip: 'tip', posGiven: 'given', posCashPart: 'cashPart', posExtra: 'extra', posNote: 'note'}[t.id];
+      if (t.dataset.pmd !== undefined) this.pos.lines[Number(t.dataset.pmd)].mdisc = t.value;
+      const k = {posTip: 'tip', posGiven: 'given', posCashPart: 'cashPart', posMdReason: 'mdReason', posNote: 'note'}[t.id];
       if (k) this.pos[k] = t.value;
       return this.posLive();
     }
@@ -1057,6 +1118,12 @@ const App = {
                                         t.id === 'roundMode' ? t.value : this.data.round[1]];
                      toast('Đã lưu cách làm tròn', 'ok'); this.drawTiers(); })
         .catch(e => toast(e.message, 'bad'));
+    }
+    if (/^b(From|To|Barber|Only|Pay|Src)$/.test(t.id)){
+      const k = t.id.slice(1).toLowerCase(), b = this.bills;
+      b[k] = t.value; b.limit = 200;
+      if (k === 'from' || k === 'to'){ b.preset = ''; if (!t.value) return; }
+      return this.billsReload(k === 'from' || k === 'to');
     }
     if (t.id === 'posPromo'){ this.pos.promo = Number(t.value); return this.drawPos(); }
     if (t.id === 'posDate'){ this.pos.date = t.value; return; }

@@ -375,7 +375,12 @@ case 'bill_create': {
       if ($unit < 1000 || $unit > 10000000)
         out(['ok' => false, 'error' => 'Nhập giá cho "' . $s['name'] . '" (từ 1.000đ đến 10 triệu).'], 400);
     }
-    $lines[] = ['svc' => $s, 'qty' => $qty, 'unit' => $unit];
+    /* Giảm thêm bằng tay trên cả dòng — ai cũng giảm được nhưng phải ghi lý
+       do, và hoá đơn mang dấu ⚠ cho chủ soát lúc chốt ca. */
+    $md = max(0, (int)($it['mdisc'] ?? 0));
+    if ($md > $unit * $qty)
+      out(['ok' => false, 'error' => 'Giảm thêm cho "' . $s['name'] . '" lớn hơn giá món.'], 400);
+    $lines[] = ['svc' => $s, 'qty' => $qty, 'unit' => $unit, 'mdisc' => $md];
     if ($s['kind'] === 'cut') $coCat = true;
   }
 
@@ -398,8 +403,12 @@ case 'bill_create': {
     foreach (mhPromos(true) as $p) if ($p['id'] === $pid) $promo = $p;
     if (!$promo) out(['ok' => false, 'error' => 'Khuyến mãi này đã hết hạn hoặc bị tắt. Tải lại trang.'], 400);
   }
-  $extra = $owner ? max(0, (int)inp('extra', 0)) : 0;
-  $q = mhQuote($lines, $tierPct, $tierName, $promo, $extra);
+  $q = mhQuote($lines, $tierPct, $tierName, $promo);
+  $lyDo = mb_substr(trim((string)inp('mdisc_reason', '')), 0, 200);
+  if ($q['mdisc'] > 0 && mb_strlen($lyDo) < 3)
+    out(['ok' => false, 'error' => 'Ghi lý do giảm thêm (vd: "uốn khuyến mãi tháng 10", "khách quen chủ dặn").'], 400);
+  if ($q['mdisc'] === 0) $lyDo = '';
+  $ghiChuGiam = trim($q['note'] . ($q['mdisc'] ? ($q['note'] ? ' · ' : '') . 'Giảm thêm: ' . $lyDo : ''));
 
   $expect = inp('expect_total');
   if ($expect !== null && (int)$expect !== $q['total'])
@@ -432,22 +441,23 @@ case 'bill_create': {
   $pdo = db();
   $pdo->beginTransaction();
   $pdo->prepare('INSERT INTO visits (customer_id, visit_date, visit_time, amount, subtotal, discount, disc_note, tip,
-                                     pay_cash, pay_transfer, source, note, barber_id, created_at, created_by)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+                                     pay_cash, pay_transfer, mdisc, mdisc_note, source, note, barber_id, created_at, created_by)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
       ->execute([$cid, $date, $date === mhToday() ? date('H:i') : '', $q['total'], $q['subtotal'], $q['discount'],
-                 $q['note'], $tip, $cash, $ck, $owner ? 'owner' : 'counter', mb_substr(trim((string)inp('note', '')), 0, 300),
-                 $bid, time(), $u['id']]);
+                 $ghiChuGiam, $tip, $cash, $ck, $q['mdisc'], $lyDo, $owner ? 'owner' : 'counter',
+                 mb_substr(trim((string)inp('note', '')), 0, 300), $bid, time(), $u['id']]);
   $vid = (int)$pdo->lastInsertId();
-  $ins = $pdo->prepare('INSERT INTO visit_items (visit_id, service_id, name, kind, qty, price, list_price, disc) VALUES (?,?,?,?,?,?,?,?)');
+  $ins = $pdo->prepare('INSERT INTO visit_items (visit_id, service_id, name, kind, qty, price, list_price, disc, mdisc) VALUES (?,?,?,?,?,?,?,?,?)');
   foreach ($lines as $i => $l)
     $ins->execute([$vid, $l['svc']['id'], $l['svc']['name'], $l['svc']['kind'], $l['qty'],
-                   $q['lines'][$i]['net'], $l['unit'], $q['lines'][$i]['disc']]);
+                   $q['lines'][$i]['net'], $l['unit'], $q['lines'][$i]['disc'], $q['lines'][$i]['mdisc']]);
   $pdo->commit();
 
   $moi = $c ? array_values(array_diff_key(pendingKeys($cid), $truoc)) : [];
   mhAudit($u['id'], 'bill_create', "#$vid " . ($c ? "khách #$cid" : 'khách lẻ') . ' · '
           . implode(', ', array_map(function ($l) { return $l['svc']['name'] . ($l['qty'] > 1 ? ' x' . $l['qty'] : ''); }, $lines))
-          . ' · ' . $q['total'] . ($tip ? " + tip $tip" : '') . ' · TM ' . $cash . ' / CK ' . $ck);
+          . ' · ' . $q['total'] . ($tip ? " + tip $tip" : '') . ' · TM ' . $cash . ' / CK ' . $ck
+          . ($q['mdisc'] ? ' · ⚠ giảm tay ' . $q['mdisc'] . ' (' . $lyDo . ')' : ''));
   $bill = mhVisitList('v.id = ?', [$vid], 1)[0];
   if (!$owner) $bill['customer_phone'] = mhMask((string)$bill['customer_phone']);
   $choQua = 0;
@@ -680,6 +690,82 @@ case 'reward_ungive': {
 }
 
 /* ===== trong ngày ===== */
+
+/* Sổ hoá đơn: tra lại mọi hoá đơn theo khoảng ngày — tìm theo mã, tên /
+   số điện thoại khách, tên món; lọc theo thợ, cách trả, có giảm tay… */
+case 'bills': {
+  mhRequireOwner();
+  $from = validDate(inp('from')) ? inp('from') : mhToday();
+  $to   = validDate(inp('to')) ? inp('to') : $from;
+  if ($to < $from) [$from, $to] = [$to, $from];
+  $w = ['v.visit_date BETWEEN ? AND ?']; $a = [$from, $to];
+
+  $q = trim((string)inp('q', ''));
+  $so = preg_replace('/\D/', '', $q);
+  if ($q === '') {
+  } elseif (preg_match('/^AG0*(\d+)$/i', $q, $m)) {
+    $w[] = 'v.id = ?'; $a[] = (int)$m[1];
+  } elseif (preg_match('/^HD[\w.]+$/i', $q)) {
+    $w[] = 'v.kv_invoice LIKE ?'; $a[] = '%' . $q . '%';
+  } elseif ($so !== '' && $so === preg_replace('/[\s.\-]/', '', $q)) {
+    $w[] = '(c.phone LIKE ? OR v.customer_id IN (SELECT customer_id FROM customer_aliases WHERE phone LIKE ?))';
+    $a[] = '%' . $so . '%'; $a[] = '%' . $so . '%';
+  } else {
+    /* Tên khách hoặc tên món, gõ không dấu cũng ra. */
+    $f = mhFold($q);
+    $ids = [0]; $mon = [];
+    foreach (db()->query('SELECT id, name FROM customers')->fetchAll() as $c)
+      if (str_contains(mhFold((string)$c['name']), $f)) $ids[] = (int)$c['id'];
+    foreach (db()->query('SELECT DISTINCT name FROM visit_items')->fetchAll(PDO::FETCH_COLUMN) as $n)
+      if (str_contains(mhFold((string)$n), $f)) $mon[] = $n;
+    $w[] = '(v.customer_id IN (' . implode(',', $ids) . ')'
+         . ($mon ? ' OR EXISTS (SELECT 1 FROM visit_items i WHERE i.visit_id = v.id AND i.name IN ('
+                   . implode(',', array_fill(0, count($mon), '?')) . '))' : '') . ')';
+    array_push($a, ...$mon);
+  }
+  $bid = (string)inp('barber', '');
+  if ($bid === 'none') $w[] = 'v.barber_id IS NULL';
+  elseif ((int)$bid > 0) { $w[] = 'v.barber_id = ?'; $a[] = (int)$bid; }
+  $only = (string)inp('only', '');
+  $loc = ['mdisc' => 'v.mdisc > 0', 'disc' => 'v.discount > 0', 'tip' => 'v.tip > 0',
+          'void' => 'v.void_at IS NOT NULL', 'walkin' => 'v.customer_id IS NULL'];
+  if (isset($loc[$only])) $w[] = $loc[$only];
+  $tra = ['cash' => 'v.pay_cash > 0 AND v.pay_transfer = 0', 'transfer' => 'v.pay_transfer > 0 AND v.pay_cash = 0',
+          'mix' => 'v.pay_cash > 0 AND v.pay_transfer > 0'];
+  if (isset($tra[(string)inp('pay', '')])) $w[] = $tra[(string)inp('pay', '')];
+  if (inp('src') === 'app') $w[] = "v.source <> 'import'";
+  if (inp('src') === 'import') $w[] = "v.source = 'import'";
+  $where = implode(' AND ', $w);
+
+  $limit = max(50, min(2000, (int)inp('limit', 200)));
+  $rows = mhVisitList($where, $a, $limit + 1);
+  $more = count($rows) > $limit;
+  if ($more) array_pop($rows);
+  foreach ($rows as &$v) $v['can_void'] = $v['void_at'] === null;
+  unset($v);
+
+  /* Cộng tiền chỉ tính hoá đơn còn hiệu lực (trừ khi đang lọc "đã huỷ"). */
+  $con = $only === 'void' ? $where : "$where AND v.void_at IS NULL";
+  $st = db()->prepare("SELECT COUNT(*) n, COALESCE(SUM(v.amount),0) amount, COALESCE(SUM(v.pay_cash),0) cash,
+                              COALESCE(SUM(v.pay_transfer),0) transfer, COALESCE(SUM(v.tip),0) tip,
+                              COALESCE(SUM(v.discount),0) discount, COALESCE(SUM(v.mdisc),0) mdisc,
+                              COALESCE(SUM(v.mdisc > 0),0) mdisc_n
+                         FROM visits v LEFT JOIN customers c ON c.id = v.customer_id WHERE $con");
+  $st->execute($a);
+  $tong = array_map('intval', $st->fetch());
+  $st = db()->prepare("SELECT COUNT(*) FROM visits v LEFT JOIN customers c ON c.id = v.customer_id
+                        WHERE $where AND v.void_at IS NOT NULL");
+  $st->execute($a);
+  $tong['void_n'] = (int)$st->fetchColumn();
+  $st = db()->prepare("SELECT v.visit_date d, COUNT(*) n, SUM(v.amount) amount FROM visits v
+                    LEFT JOIN customers c ON c.id = v.customer_id WHERE $con GROUP BY v.visit_date");
+  $st->execute($a);
+  $ngay = [];
+  foreach ($st->fetchAll() as $r) $ngay[$r['d']] = ['n' => (int)$r['n'], 'amount' => (int)$r['amount']];
+
+  out(['ok' => true, 'from' => $from, 'to' => $to, 'rows' => $rows, 'more' => $more, 'totals' => $tong, 'days' => $ngay,
+       'barbers' => array_map(function ($b) { return ['id' => $b['id'], 'name' => $b['name'], 'active' => $b['active']]; }, mhBarbers())]);
+}
 
 case 'day': {
   $u = mhRequireUser();

@@ -315,6 +315,7 @@ const Views = {
         ${v.note ? `<div class="sub">📝 ${esc(v.note)}</div>` : ''}
         ${huy ? `<div class="sub" style="color:var(--bad)">Đã huỷ${v.void_by_name ? ' bởi ' + esc(v.void_by_name) : ''}: ${esc(v.void_reason || '')}</div>` : ''}
       </div>
+      ${v.mdisc && !huy ? `<span class="badge warn" title="Giảm thêm tay: ${esc(v.mdisc_note || '')}">⚠ giảm tay</span>` : ''}
       ${(v.flags || []).includes('NO_INVOICE') && !huy ? '<span class="badge bad" title="Đối soát không thấy hoá đơn KiotViet nào cùng ngày">không có HĐ</span>' : ''}
       ${!huy && v.pay_cash + v.pay_transfer > 0 ? `<button class="link" data-act="printBill" data-id="${v.id}" title="In hoá đơn">🖨</button>` : ''}
       ${v.can_void && (App.barbers || []).length ? `<select class="vbsel" data-vb="${v.id}" title="Đổi thợ">
@@ -409,10 +410,15 @@ const Views = {
       const s = sv.find(x => x.id === l.sid);
       if (!s) return '';
       const r = q.lines[i] || {};
-      return `<div class="pline">
+      return `<div class="pline${l.mdOpen ? ' md' : ''}">
         <div class="grow"><b>${esc(s.name)}</b>
           <div class="sub num">${s.price ? tien(s.price) : `<input class="inp pprice" data-pprice="${i}" data-money inputmode="numeric" placeholder="Nhập giá" value="${soTien(l.price)}">`}
-            <span id="pdisc${i}" style="color:var(--ok)">${r.disc ? ' · −' + tienGon(r.disc) : ''}</span></div></div>
+            <span id="pdisc${i}" style="color:var(--${l.mdOpen ? 'warn' : 'ok'})">${r.disc ? ' · −' + tienGon(r.disc) : ''}</span>
+            ${l.mdOpen ? '' : `<button class="link mdbtn" data-act="posMd" data-i="${i}">+ giảm thêm</button>`}</div>
+          ${l.mdOpen ? `<div class="mdrow"><span>⚠ Giảm thêm</span>
+            <input class="inp mini" id="posMd${i}" data-pmd="${i}" data-money inputmode="numeric" placeholder="số tiền" value="${soTien(l.mdisc)}">
+            <button class="link bad" data-act="posMd" data-i="${i}" title="Bỏ giảm thêm">✕</button>
+            <span class="dim">món này không giảm theo hạng nữa</span></div>` : ''}</div>
         <div class="qty"><button data-act="posQty" data-i="${i}" data-d="-1" aria-label="Bớt">−</button><b class="num">${l.qty}</b>
           <button data-act="posQty" data-i="${i}" data-d="1" aria-label="Thêm">+</button></div>
         <b class="num" id="pnet${i}" style="min-width:76px;text-align:right">${r.net != null ? tien(r.net) : ''}</b>
@@ -460,9 +466,9 @@ const Views = {
             </select></div>` : ''}
           <div class="sum">
             <div class="row"><span class="grow">Tổng tiền hàng</span><span class="num" id="posSub">${tien(q.subtotal)}</span></div>
-            <div class="row" id="posDiscRow" style="color:var(--ok)${q.discount ? '' : ';display:none'}"><span class="grow" id="posDiscNote">Giảm · ${esc(q.note)}</span><span class="num" id="posDiscAmt">−${tien(q.discount)}</span></div>
-            ${owner ? `<div class="row"><span class="grow">Chủ giảm thêm</span>
-              <input class="inp mini" id="posExtra" data-money inputmode="numeric" value="${soTien(st.extra)}" placeholder="0"></div>` : ''}
+            <div class="row" id="posDiscRow" style="color:var(--ok)${q.discount - q.mdisc ? '' : ';display:none'}"><span class="grow" id="posDiscNote">Giảm · ${esc(q.note)}</span><span class="num" id="posDiscAmt">−${tien(q.discount - q.mdisc)}</span></div>
+            ${st.lines.some(l => l.mdOpen) ? `<div class="row" style="color:var(--warn)"><span class="grow">⚠ Giảm thêm tay</span><span class="num" id="posMdAmt">−${tien(q.mdisc)}</span></div>
+              <input class="inp mdreason" id="posMdReason" placeholder="Lý do giảm thêm (bắt buộc) — chủ xem lại lúc chốt ca" value="${esc(st.mdReason || '')}">` : ''}
             <div class="row"><span class="grow">Tip cho thợ <span class="dim">(trả thợ ngay trong ngày)</span></span>
               <input class="inp mini" id="posTip" data-money inputmode="numeric" value="${soTien(st.tip)}" placeholder="0"></div>
             <div class="row total"><span class="grow">Khách trả</span><b class="num" id="posTotal">${tien(tongTra)}</b></div>
@@ -491,6 +497,7 @@ const Views = {
       const s = sv.find(x => x.id === l.sid);
       if (s && !s.price && !(l.price >= 1000)) return 'Nhập giá cho ' + s.name + '.';
     }
+    if (q.mdisc > 0 && String(st.mdReason || '').trim().length < 3) return 'Ghi lý do giảm thêm.';
     if (!st.pay) return 'Chọn cách khách trả tiền.';
     const tong = q.total + st.tipN;
     if (st.pay === 'mix' && !(st.cashPartN > 0 && st.cashPartN < tong)) return 'Nhập phần tiền mặt (nhỏ hơn tổng).';
@@ -560,7 +567,7 @@ const Views = {
       ${v.barber_name ? `<div>Thợ: ${esc(v.barber_name)}</div>` : ''}
       <table>${dong}
         <tr class="t"><td>Tổng tiền hàng</td><td class="r">${tien(v.subtotal || v.amount + v.discount)}</td></tr>
-        ${v.discount ? `<tr><td>Giảm giá${v.disc_note ? ' (' + esc(v.disc_note) + ')' : ''}</td><td class="r">−${tien(v.discount)}</td></tr>` : ''}
+        ${v.discount ? `<tr><td>Giảm giá${v.disc_note ? ' (' + esc(v.disc_note.replace(/Giảm thêm:.*$/, 'giảm thêm').replace(/^ · /, '')) + ')' : ''}</td><td class="r">−${tien(v.discount)}</td></tr>` : ''}
         ${v.tip ? `<tr><td>Tip</td><td class="r">${tien(v.tip)}</td></tr>` : ''}
         <tr class="b"><td>Thanh toán</td><td class="r">${tien(v.amount + v.tip)}</td></tr>
         ${v.pay_cash ? `<tr><td>Tiền mặt</td><td class="r">${tien(v.pay_cash)}</td></tr>` : ''}
@@ -597,6 +604,7 @@ const Views = {
       t.n += i.qty; t.dt += i.price; dv.set(i.name, t);
     }));
     const homNay = d.date === App.today;
+    const giamTay = con.filter(v => v.mdisc > 0);
 
     return `<div class="wrap">
       ${head(owner ? 'Sổ ngày' : 'Báo cáo hôm nay', false, `${owner
@@ -610,6 +618,7 @@ const Views = {
         <div class="stat"><div class="n">${tienGon(tip)}</div><div class="l">tip${giam ? ' · đã giảm ' + tienGon(giam) : ''}</div></div>
       </div>
       ${chuaGhi.length ? `<p class="note" style="color:var(--warn)">${chuaGhi.length} lượt ghi kiểu cũ chưa có cách trả tiền (${tien(sum(chuaGhi, 'amount'))}) — không tính vào két.</p>` : ''}
+      ${this.mdWarn(giamTay)}
       ${this.shift(d, con)}
       <div class="cols">
         ${tho.size ? `<div class="card"><h3>Theo thợ</h3><div class="tblwrap" style="border:0"><table class="tbl" style="font-size:13.5px">
@@ -626,10 +635,126 @@ const Views = {
         <button class="item" data-act="open" data-id="${g.customer_id}"><div class="grow"><b>${esc(g.gift)}</b>
           <div class="sub">${esc(g.name)} · ${g.time}${g.by ? ' · ' + esc(g.by) : ''}</div></div></button>`).join('')}</div></div>` : ''}
       <div class="card"><h3>Hoá đơn (${con.length}${d.visits.length > con.length ? ' · ' + (d.visits.length - con.length) + ' đã huỷ' : ''})</h3>
-        ${d.visits.length ? `<div class="list">${d.visits.map(v => this.visitRow(v, true)).join('')}</div>`
-                          : '<div class="dim">Chưa có hoá đơn nào.</div>'}
+        ${d.visits.length ? this.billList(d.visits) : '<div class="dim">Chưa có hoá đơn nào.</div>'}
       </div>
     </div>`;
+  },
+
+  /* Hoá đơn có giảm thêm tay — gom lên đầu sổ ngày để chủ soát lúc chốt ca. */
+  mdWarn(ds){
+    if (!ds.length) return '';
+    return `<div class="card mdwarn"><h3>⚠ ${ds.length} hoá đơn giảm thêm tay · −${tien(ds.reduce((a, v) => a + v.mdisc, 0))}</h3>
+      <div class="list">${ds.map(v => `<div class="item"><div class="grow">
+        <b>${esc(v.visit_time || '')} · ${esc(v.customer_name || 'Khách lẻ')}</b> <span class="dim num">${esc(v.code)}</span>
+        <div class="sub">${v.items.filter(i => i.mdisc).map(i => `${esc(i.name)}: <s class="dim">${tien(i.list_price * i.qty)}</s> → <b>${tien(i.price)}</b>`).join(' · ')}</div>
+        <div class="sub">Lý do: <b>${esc(v.mdisc_note || '—')}</b>${v.by_name ? ' · lập bởi ' + esc(v.by_name) : ''}${v.barber_name ? ' · ✂︎ ' + esc(v.barber_name) : ''}</div>
+      </div><b class="num" style="color:var(--warn)">−${tien(v.mdisc)}</b></div>`).join('')}</div>
+      <p class="dim" style="margin:8px 0 0">Món giảm thêm không theo hạng hay khuyến mãi — quầy tự gõ số tiền giảm và lý do.</p></div>`;
+  },
+
+  /* Danh sách hoá đơn gọn: giờ · khách · SĐT · tiền · thợ. Bấm một dòng
+     mới mở chi tiết món, giảm giá, cách trả, người lập. */
+  billList(ds){
+    return `<div class="blist"><div class="bhead"><span>Giờ</span><span>Khách</span><span>SĐT</span><span class="r">Tiền</span><span>Thợ</span></div>
+      ${ds.map(v => this.billRow(v)).join('')}</div>`;
+  },
+
+  billRow(v){
+    const huy = v.void_at != null;
+    const tra = v.pay_cash && v.pay_transfer ? '💵🏦' : v.pay_cash ? '💵' : v.pay_transfer ? '🏦' : '';
+    return `<details class="brow${huy ? ' void' : ''}${v.mdisc && !huy ? ' md' : ''}"><summary>
+      <span class="bt num">${esc(v.visit_time || '—')}</span>
+      <span class="bk">${v.customer_id ? esc(v.customer_name || '(chưa tên)') : '<i class="dim">Khách lẻ</i>'}
+        ${huy ? '<span class="badge bad">huỷ</span>' : ''}${v.mdisc && !huy ? '<span class="badge warn">⚠ giảm tay</span>' : ''}</span>
+      <span class="bp num dim">${esc(v.customer_phone || '')}</span>
+      <span class="ba num"><b>${tien(v.amount)}</b> <small title="${v.pay_cash && v.pay_transfer ? 'Tiền mặt + chuyển khoản' : v.pay_cash ? 'Tiền mặt' : 'Chuyển khoản'}">${tra}</small></span>
+      <span class="bb">${v.barber_name ? '✂︎ ' + esc(v.barber_name) : '<span class="dim">—</span>'}</span>
+    </summary>${this.billDetail(v)}</details>`;
+  },
+
+  billDetail(v){
+    const huy = v.void_at != null;
+    const dong = v.items.map(i => `<tr${i.mdisc ? ' class="md"' : ''}><td>${esc(i.name)}</td><td class="r num">${i.qty}</td>
+      <td class="r num">${i.list_price ? tien(i.list_price) : ''}</td>
+      <td class="r num">${i.disc ? (i.mdisc ? '⚠ ' : '') + '−' + tien(i.disc) : ''}</td><td class="r num"><b>${tien(i.price)}</b></td></tr>`).join('');
+    const giamKhac = v.discount - (v.mdisc || 0);
+    const noteKhac = (v.disc_note || '').replace(/\s*·?\s*Giảm thêm:.*$/, '');
+    return `<div class="bdetail">
+      <table class="tbl bitems"><thead><tr><th>Món</th><th class="r">SL</th><th class="r">Đơn giá</th><th class="r">Giảm</th><th class="r">Thành tiền</th></tr></thead>
+        <tbody>${dong || '<tr><td colspan="5" class="dim">—</td></tr>'}</tbody></table>
+      <div class="bsum">
+        ${v.subtotal ? `<div><span>Tổng tiền hàng</span><b class="num">${tien(v.subtotal)}</b></div>` : ''}
+        ${giamKhac > 0 ? `<div style="color:var(--ok)"><span>Giảm${noteKhac ? ' · ' + esc(noteKhac) : ''}</span><b class="num">−${tien(giamKhac)}</b></div>` : ''}
+        ${v.mdisc ? `<div style="color:var(--warn)"><span>⚠ Giảm thêm tay · ${esc(v.mdisc_note || '')}</span><b class="num">−${tien(v.mdisc)}</b></div>` : ''}
+        <div class="t"><span>Hoá đơn</span><b class="num">${tien(v.amount)}</b></div>
+        ${v.tip ? `<div><span>Tip cho thợ (trả trong ngày)</span><b class="num">${tien(v.tip)}</b></div>` : ''}
+        ${v.pay_cash ? `<div><span>💵 Tiền mặt</span><b class="num">${tien(v.pay_cash)}</b></div>` : ''}
+        ${v.pay_transfer ? `<div><span>🏦 Chuyển khoản</span><b class="num">${tien(v.pay_transfer)}</b></div>` : ''}
+      </div>
+      <div class="sub dim">${esc(v.code || '')} · ${ngay(v.visit_date)} ${esc(v.visit_time || '')}
+        ${v.by_name && v.source !== 'import' ? ' · lập bởi ' + esc(v.by_name) : ''}${v.source === 'import' ? ' · nhập từ KiotViet' : ''}</div>
+      ${v.note ? `<div class="sub">📝 ${esc(v.note)}</div>` : ''}
+      ${huy ? `<div class="sub" style="color:var(--bad)">Đã huỷ${v.void_by_name ? ' bởi ' + esc(v.void_by_name) : ''}: ${esc(v.void_reason || '')}</div>` : ''}
+      <div class="row bact">
+        ${!huy && v.pay_cash + v.pay_transfer > 0 ? `<button class="chip" data-act="printBill" data-id="${v.id}">🖨 In</button>` : ''}
+        ${v.customer_id ? `<button class="chip" data-act="open" data-id="${v.customer_id}">Thẻ khách</button>` : ''}
+        ${v.can_void && (App.barbers || []).length ? `<select class="vbsel" data-vb="${v.id}" title="Đổi thợ">
+          <option value="0">— thợ —</option>
+          ${App.barbers.map(b => `<option value="${b.id}"${b.id === v.barber_id ? ' selected' : ''}>${esc(b.name)}</option>`).join('')}
+        </select>` : ''}
+        ${v.can_void ? `<button class="link bad" data-act="void" data-id="${v.id}">Huỷ hoá đơn</button>` : ''}
+      </div></div>`;
+  },
+
+  /* ---------------- sổ hoá đơn ---------------- */
+  bills(st, d){
+    const chon = (id, ds, val) => `<select class="inp" id="${id}">${ds.map(([k, n]) =>
+      `<option value="${k}"${String(val) === String(k) ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select>`;
+    return `<div class="wrap">
+      ${head('Hoá đơn', false, '<button class="chip" data-act="reload">↻</button>')}
+      <div class="card bfilt">
+        <div class="chips" style="margin:0 0 10px">${[['today', 'Hôm nay'], ['yday', 'Hôm qua'], ['7d', '7 ngày'], ['month', 'Tháng này'], ['pmonth', 'Tháng trước']]
+          .map(([k, n]) => `<button class="chip${st.preset === k ? ' on' : ''}" data-act="billsPreset" data-k="${k}">${n}</button>`).join('')}</div>
+        <div class="bfrow">
+          <label class="bdate"><input type="date" class="inp" id="bFrom" value="${esc(d.from)}" max="${esc(App.today)}"> →
+            <input type="date" class="inp" id="bTo" value="${esc(d.to)}" max="${esc(App.today)}"></label>
+          <input class="inp" id="bQ" placeholder="Mã HĐ, tên / SĐT khách, tên món…" value="${esc(st.q)}" autocomplete="off">
+        </div>
+        <div class="bfrow sel">
+          ${chon('bBarber', [['', 'Mọi thợ'], ...d.barbers.map(b => [b.id, b.name + (b.active ? '' : ' (nghỉ)')]), ['none', 'Chưa ghi thợ']], st.barber)}
+          ${chon('bOnly', [['', 'Mọi hoá đơn'], ['mdisc', '⚠ Có giảm thêm tay'], ['disc', 'Có giảm giá'], ['tip', 'Có tip'], ['walkin', 'Khách lẻ'], ['void', 'Đã huỷ']], st.only)}
+          ${chon('bPay', [['', 'Mọi cách trả'], ['cash', '💵 Tiền mặt'], ['transfer', '🏦 Chuyển khoản'], ['mix', 'Cả hai']], st.pay)}
+          ${chon('bSrc', [['', 'App + KiotViet'], ['app', 'Lập trên app'], ['import', 'Nhập từ KiotViet']], st.src)}
+        </div>
+      </div>
+      <div id="billsBody">${this.billsBody(d)}</div>
+    </div>`;
+  },
+
+  billsBody(d){
+    const t = d.totals, thu = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
+    let ngayTruoc = '', html = '';
+    d.rows.forEach(v => {
+      if (v.visit_date !== ngayTruoc){
+        if (ngayTruoc) html += '</div>';
+        ngayTruoc = v.visit_date;
+        const n = d.days[v.visit_date] || {n: 0, amount: 0};
+        html += `<div class="dayhead"><b>${thu[new Date(v.visit_date + 'T00:00:00').getDay()]} · ${ngay(v.visit_date)}</b>
+          <span class="num">${n.n} HĐ · ${tien(n.amount)}</span></div><div class="blist">
+          <div class="bhead"><span>Giờ</span><span>Khách</span><span>SĐT</span><span class="r">Tiền</span><span>Thợ</span></div>`;
+      }
+      html += this.billRow(v);
+    });
+    if (ngayTruoc) html += '</div>';
+    return `<div class="stats">
+        <div class="stat"><div class="n">${tien(t.amount)}</div><div class="l">doanh thu · ${t.n} hoá đơn</div></div>
+        <div class="stat cash"><div class="n">${tien(t.cash)}</div><div class="l">💵 tiền mặt (gồm tip)</div></div>
+        <div class="stat"><div class="n">${tien(t.transfer)}</div><div class="l">🏦 chuyển khoản (gồm tip)</div></div>
+        <div class="stat"><div class="n">${tien(t.discount)}</div><div class="l">đã giảm${t.mdisc_n ? ` · <b style="color:var(--warn)">⚠ ${t.mdisc_n} HĐ giảm tay ${tienGon(t.mdisc)}</b>` : ''}${t.tip ? ' · tip ' + tienGon(t.tip) : ''}</div></div>
+      </div>
+      ${t.void_n ? `<p class="dim" style="margin:-4px 0 10px">${t.void_n} hoá đơn đã huỷ trong khoảng này (không cộng vào tiền).</p>` : ''}
+      ${d.rows.length ? `<div class="card" style="padding-top:4px">${html}</div>` : '<div class="card dim">Không có hoá đơn nào khớp.</div>'}
+      ${d.more ? `<button class="btn" data-act="billsMore" style="margin-top:10px">Xem thêm hoá đơn cũ hơn</button>` : ''}`;
   },
 
   /* Chốt ca — 4 khung theo thứ tự quầy làm cuối ngày:
@@ -785,7 +910,9 @@ const Views = {
   /* Bảng lương một thợ — dựng như trang Excel: mục I–V, mỗi mục có dòng cộng. */
   paySheet(t, khoa){
     const p = this.payParts(t);
-    const sec = (so, ten) => `<tr class="sec"><td colspan="4">${so}. ${ten}</td></tr>`;
+    /* Mỗi mục cách mục trên một dòng trống — nhìn tách bạch như file Excel. */
+    const gap = '<tr class="gap"><td colspan="4"></td></tr>';
+    const sec = (so, ten) => `${so === 'I' ? '' : gap}<tr class="sec"><td colspan="4">${so}. ${ten}</td></tr>`;
     const cong = (ten, v, am) => `<tr class="tot"><td colspan="3">${ten}</td><td class="r num">${am && v ? '−' : ''}${tien(v)}</td></tr>`;
     const congTien = t.rows.filter(r => !r.comm_pct), hh = t.rows.filter(r => r.comm_pct);
     const adj = (ds, am) => ds.map(a => `<tr><td>${esc(a.label)}${a.recurring ? ' <span class="badge">hằng tháng</span>' : ''}
@@ -813,7 +940,7 @@ const Views = {
         ${sec('V', 'Khoản trừ — nợ · ứng · bảo hiểm')}
         ${adj(t.adjust.filter(a => a.amount < 0), true) || '<tr><td colspan="4" class="dim">Chưa có.</td></tr>'}
         ${cong('Cộng V', p.minus, true)}
-        <tr class="net"><td colspan="3">THỰC NHẬN = I + II + III + IV − V</td><td class="r num">${tien(t.total)}</td></tr>
+        ${gap}<tr class="net"><td colspan="3">THỰC NHẬN = I + II + III + IV − V</td><td class="r num">${tien(t.total)}</td></tr>
       </tbody></table>
       <div class="dim" style="margin-top:6px">${t.bills} hoá đơn · doanh thu ${tien(t.revenue)}${t.tip ? ` · tip đã nhận trong ngày ${tien(t.tip)} (không tính lại)` : ''}</div>`;
   },

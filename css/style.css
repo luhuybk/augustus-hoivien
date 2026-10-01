@@ -173,6 +173,8 @@ button.item:active{background:var(--bg3)}
              align-items:center;gap:3px;font-size:11px;color:var(--tx3)}
 .tabs button span{font-size:19px;line-height:1}
 .tabs button.on{color:var(--acc)}
+.tabs button{min-width:0;white-space:nowrap}
+@media(max-width:480px){.tabs button{font-size:10px;padding:8px 0}.tabs button span{font-size:18px}}
 
 .toast{position:fixed;left:50%;transform:translateX(-50%);
        bottom:calc(80px + env(safe-area-inset-bottom));z-index:90;
@@ -377,6 +379,8 @@ button.tcard:hover{background:var(--bg3)}
 .tbl.xl tr.tot td{font-weight:700;background:rgba(214,165,74,.06)}
 .tbl.xl tr.net td{font-weight:800;font-size:15.5px;background:rgba(214,165,74,.16);color:var(--acc)}
 .tbl.xl td.bad,.tbl td.bad{color:var(--bad)}
+.tbl.xl tr.gap td{height:16px;padding:0;border-left-color:transparent;border-right-color:transparent;background:transparent}
+.tbl.xl tbody tr.gap:hover,.tbl.xl tbody tr.gap:hover td{background:transparent}
 .tbl.sheet tbody tr{cursor:default}
 .tbl.sheet td:first-child{white-space:normal}
 
@@ -412,3 +416,59 @@ button.tcard:hover{background:var(--bg3)}
 .formula small{font-size:11.5px;font-weight:500;color:var(--tx3)}
 .formula em{font-style:normal;color:var(--tx3);font-size:18px}
 .formula .eq{color:var(--acc);font-size:21px}
+
+/* ---------------- giảm thêm tay ---------------- */
+.pline.md{background:rgba(255,184,77,.05)}
+.pline .mdbtn{font-size:12.5px;padding:0 0 0 6px;color:var(--tx3)}
+.mdrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px;font-size:13px;color:var(--warn)}
+.mdrow .inp.mini{width:110px;padding:5px 8px;border-color:var(--warn)}
+.mdrow .dim{font-size:12px}
+.inp.mdreason{margin:6px 0 4px;border-color:var(--warn)}
+.card.mdwarn{border:1px solid var(--warn);background:rgba(255,184,77,.06)}
+.card.mdwarn h3{color:var(--warn)}
+.card.mdwarn s{text-decoration:line-through}
+
+/* ---------------- danh sách hoá đơn gọn ---------------- */
+.blist{margin:0 -4px}
+.bhead,.brow>summary{display:grid;grid-template-columns:52px minmax(0,1.5fr) minmax(0,1fr) 120px minmax(0,1fr);
+  gap:10px;align-items:center;padding:9px 8px}
+.bhead{font-size:11.5px;text-transform:uppercase;letter-spacing:.3px;color:var(--tx3);border-bottom:1px solid var(--line);padding-top:4px}
+.bhead .r,.brow .ba{text-align:right}
+.brow{border-bottom:1px solid var(--line)}
+.brow>summary{list-style:none;cursor:pointer;border-radius:8px}
+.brow>summary::-webkit-details-marker{display:none}
+.brow>summary:hover{background:var(--bg3)}
+.brow[open]>summary{background:var(--bg3)}
+.brow .bk{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.brow .bk .badge{margin-left:6px;font-size:11px;padding:2px 7px}
+.brow .bp,.brow .bb{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13.5px}
+.brow .ba small{font-size:12px}
+.brow.void>summary{opacity:.5;text-decoration:line-through}
+.brow.md>summary{box-shadow:inset 3px 0 0 var(--warn)}
+.bdetail{padding:6px 10px 14px 62px}
+.bitems{font-size:13.5px;margin:4px 0 8px}
+.bitems td,.bitems th{padding:5px 8px}
+.bitems tr.md td{color:var(--warn)}
+.bsum{max-width:420px;margin-left:auto;font-size:13.5px}
+.bsum>div{display:flex;justify-content:space-between;gap:12px;padding:2px 0}
+.bsum>div.t{border-top:1px dashed var(--line);margin-top:3px;padding-top:5px;font-size:15px}
+.bact{gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center}
+.dayhead{display:flex;justify-content:space-between;gap:10px;padding:14px 4px 6px;color:var(--acc);font-size:14px}
+.dayhead span{color:var(--tx2)}
+.bfrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.bfrow+.bfrow{margin-top:8px}
+.bfrow #bQ{flex:1;min-width:200px}
+.bdate{display:flex;align-items:center;gap:6px;color:var(--tx3)}
+.bdate .inp{width:auto;padding:8px}
+.bfrow.sel .inp{width:auto;flex:1;min-width:140px;padding:8px}
+@media(max-width:640px){
+  .bhead{display:none}
+  .brow>summary{grid-template-columns:44px minmax(0,1fr) auto;grid-template-areas:"t k a" "t p b";row-gap:2px}
+  .brow .bt{grid-area:t}.brow .bk{grid-area:k}.brow .bp{grid-area:p;font-size:12.5px}
+  .brow .ba{grid-area:a}.brow .bb{grid-area:b;text-align:right;font-size:12.5px}
+  .bdetail{padding:6px 4px 14px}
+  .bitems th:nth-child(3),.bitems td:nth-child(3){display:none}
+  .bitems{width:100%;font-size:13px}
+  .bitems td,.bitems th{padding:5px 4px}
+  .bitems td:first-child{white-space:normal}
+}

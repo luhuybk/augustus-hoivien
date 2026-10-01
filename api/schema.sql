@@ -143,6 +143,8 @@ CREATE TABLE IF NOT EXISTS visits (
   tip         INTEGER NOT NULL DEFAULT 0,
   pay_cash    INTEGER NOT NULL DEFAULT 0,
   pay_transfer INTEGER NOT NULL DEFAULT 0,
+  mdisc       INTEGER NOT NULL DEFAULT 0,    -- giảm thêm bằng tay (đ) — có ⚠ khi chốt ca
+  mdisc_note  TEXT    NOT NULL DEFAULT '',   -- lý do giảm thêm, bắt buộc khi mdisc > 0
   source      TEXT    NOT NULL DEFAULT 'counter',
   kv_invoice  TEXT,                          -- mã hoá đơn KiotViet đã khớp
   flags       TEXT    NOT NULL DEFAULT '',   -- NO_INVOICE: đối soát không thấy hoá đơn
@@ -172,7 +174,8 @@ CREATE TABLE IF NOT EXISTS visit_items (
   qty         INTEGER NOT NULL DEFAULT 1,
   price       INTEGER NOT NULL DEFAULT 0,    -- thành tiền của dòng, đã trừ giảm giá
   list_price  INTEGER NOT NULL DEFAULT 0,    -- đơn giá niêm yết lúc bán
-  disc        INTEGER NOT NULL DEFAULT 0     -- giảm giá của dòng
+  disc        INTEGER NOT NULL DEFAULT 0,    -- giảm giá của dòng (gồm cả giảm tay)
+  mdisc       INTEGER NOT NULL DEFAULT 0     -- phần giảm thêm bằng tay của dòng
 );
 CREATE INDEX IF NOT EXISTS idx_item_visit ON visit_items(visit_id);
 CREATE INDEX IF NOT EXISTS idx_item_kind  ON visit_items(kind, visit_id);

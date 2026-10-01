@@ -155,6 +155,11 @@ function mhMigrate(PDO $pdo): void {
   mhAddColumn($pdo, 'payroll_adjust', 'rate', 'INTEGER NOT NULL DEFAULT 0');
   mhAddColumn($pdo, 'payroll_adjust', 'recurring', 'INTEGER NOT NULL DEFAULT 0');
   if (mhAddColumn($pdo, 'services', 'grp', "TEXT NOT NULL DEFAULT 'A'")) mhSeedGroups($pdo);
+  /* Giảm thêm bằng tay trên từng món (uốn giảm thẳng 100k…), không theo
+     hạng — bắt buộc ghi lý do, hiện ⚠ trong sổ ngày cho chủ soát. */
+  mhAddColumn($pdo, 'visits', 'mdisc', 'INTEGER NOT NULL DEFAULT 0');
+  mhAddColumn($pdo, 'visits', 'mdisc_note', "TEXT NOT NULL DEFAULT ''");
+  mhAddColumn($pdo, 'visit_items', 'mdisc', 'INTEGER NOT NULL DEFAULT 0');
 
   if ((int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn() > 0) {
     mhSyncOwnerFromConfig($pdo);
@@ -860,16 +865,16 @@ function mhVisitList(string $where, array $args, int $limit = 200): array {
   if (!$rows) return [];
   $ids = array_map(function ($r) { return (int)$r['id']; }, $rows);
   $items = [];
-  $q = db()->query('SELECT visit_id, service_id, name, kind, qty, price, list_price, disc FROM visit_items WHERE visit_id IN ('
+  $q = db()->query('SELECT visit_id, service_id, name, kind, qty, price, list_price, disc, mdisc FROM visit_items WHERE visit_id IN ('
                    . implode(',', $ids) . ') ORDER BY id');
   foreach ($q->fetchAll() as $i)
     $items[(int)$i['visit_id']][] = ['name' => $i['name'], 'kind' => $i['kind'], 'service_id' => $i['service_id'] !== null ? (int)$i['service_id'] : null,
                                      'qty' => (int)$i['qty'], 'price' => (int)$i['price'],
-                                     'list_price' => (int)$i['list_price'], 'disc' => (int)$i['disc']];
+                                     'list_price' => (int)$i['list_price'], 'disc' => (int)$i['disc'], 'mdisc' => (int)$i['mdisc']];
   foreach ($rows as &$r) {
     $r['id'] = (int)$r['id']; $r['customer_id'] = $r['customer_id'] !== null ? (int)$r['customer_id'] : null;
     $r['code'] = mhBillCode($r);
-    foreach (['amount', 'subtotal', 'discount', 'tip', 'pay_cash', 'pay_transfer'] as $k) $r[$k] = (int)$r[$k];
+    foreach (['amount', 'subtotal', 'discount', 'tip', 'pay_cash', 'pay_transfer', 'mdisc'] as $k) $r[$k] = (int)$r[$k];
     $r['created_at'] = (int)$r['created_at'];
     $r['created_by'] = $r['created_by'] !== null ? (int)$r['created_by'] : null;
     $r['barber_id'] = $r['barber_id'] !== null ? (int)$r['barber_id'] : null;
@@ -895,10 +900,11 @@ function mhBillCode(array $v): string {
    Một chỗ duy nhất tính giảm giá — app.js tính y hệt để hiện trước, nhưng
    số ghi vào sổ luôn là số máy chủ tính ở đây.
 
-   $lines: [['svc' => dòng services, 'qty' => n, 'unit' => đơn giá]]
+   $lines: [['svc' => dòng services, 'qty' => n, 'unit' => đơn giá, 'mdisc' => giảm tay]]
    Giảm theo hạng và khuyến mãi KHÔNG cộng dồn — lấy mức lớn hơn. Cả hai
-   chỉ áp lên dòng được giảm (services.discountable). $extra: chủ giảm thêm
-   bằng tay, chia đều theo tỉ lệ mọi dòng.
+   chỉ áp lên dòng được giảm (services.discountable). Món có giảm thêm
+   bằng tay (mdisc, tính trên cả dòng) thì bỏ qua hạng/KM — giảm đúng số
+   quầy gõ, không phụ thuộc hạng.
 
    Giảm theo % thì làm tròn GIÁ SAU GIẢM của từng món theo bước chủ chọn
    ($round = 5000 / 10000, $mode 'down' = xuống, có lợi cho khách; 'near'
@@ -908,7 +914,7 @@ function mhRoundCfg(): array {
   return [in_array($b, [1000, 5000, 10000], true) ? $b : 1000, mhSetting('disc_round_mode', 'down') === 'near' ? 'near' : 'down'];
 }
 
-function mhQuote(array $lines, int $tierPct, string $tierName, ?array $promo, int $extra = 0, ?array $round = null): array {
+function mhQuote(array $lines, int $tierPct, string $tierName, ?array $promo, ?array $round = null): array {
   [$buoc, $kieu] = $round ?? mhRoundCfg();
   $gross = []; $elig = 0;
   foreach ($lines as $i => $l) {
@@ -928,7 +934,9 @@ function mhQuote(array $lines, int $tierPct, string $tierName, ?array $promo, in
     }
     return $ra;
   };
-  $eligIdx = array_keys(array_filter($lines, function ($l) { return (int)$l['svc']['discountable'] === 1; }));
+  $eligIdx = array_keys(array_filter($lines, function ($l) {
+    return (int)$l['svc']['discountable'] === 1 && empty($l['mdisc']);
+  }));
 
   $pct = function (int $p) use ($eligIdx, $lines, $buoc, $kieu) {
     $ra = [];
@@ -951,22 +959,14 @@ function mhQuote(array $lines, int $tierPct, string $tierName, ?array $promo, in
 
   $disc = [];
   foreach ($lines as $i => $l) $disc[$i] = min($gross[$i], $dung[$i] ?? 0);
-  if ($extra > 0) {
-    $con = [];
-    foreach ($lines as $i => $l) $con[$i] = $gross[$i] - $disc[$i];
-    $tongCon = array_sum($con);
-    $extra = min($extra, $tongCon);
-    $co = 0; $idx = array_keys($lines); $cuoi = end($idx);
-    foreach ($idx as $i) {
-      $d = $i === $cuoi ? $extra - $co : ($tongCon ? intdiv($extra * $con[$i], $tongCon) : 0);
-      $d = min($d, $con[$i]);
-      $disc[$i] += $d; $co += $d;
-    }
-    $note = trim($note . ($note ? ' · ' : '') . 'Chủ giảm thêm');
-  }
-  $ra = ['lines' => [], 'subtotal' => 0, 'discount' => 0, 'total' => 0, 'note' => $note];
+  $tay = [];
   foreach ($lines as $i => $l) {
-    $ra['lines'][] = ['net' => $gross[$i] - $disc[$i], 'disc' => $disc[$i], 'gross' => $gross[$i]];
+    $tay[$i] = min($gross[$i], max(0, (int)($l['mdisc'] ?? 0)));
+    if ($tay[$i] > 0) $disc[$i] = $tay[$i];
+  }
+  $ra = ['lines' => [], 'subtotal' => 0, 'discount' => 0, 'total' => 0, 'note' => $note, 'mdisc' => array_sum($tay)];
+  foreach ($lines as $i => $l) {
+    $ra['lines'][] = ['net' => $gross[$i] - $disc[$i], 'disc' => $disc[$i], 'gross' => $gross[$i], 'mdisc' => $tay[$i]];
     $ra['subtotal'] += $gross[$i];
     $ra['discount'] += $disc[$i];
   }
