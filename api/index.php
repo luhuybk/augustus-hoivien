@@ -402,8 +402,13 @@ case 'bill_create': {
     $dt = mb_substr(trim(preg_replace('/\s+/u', ' ', (string)($it['detail'] ?? ''))), 0, 80);
     if ($s['kind'] === 'product' && $dt === '')
       out(['ok' => false, 'error' => 'Ghi tên sản phẩm cho dòng "' . $s['name'] . '".'], 400);
-    $lines[] = ['svc' => $s, 'qty' => $qty, 'unit' => $unit, 'mdisc' => $md, 'detail' => $dt];
-    if ($s['kind'] === 'cut') $coCat = true;
+    /* Bạn đi cùng: tính chung hoá đơn của khách chính, có thể thợ khác làm. */
+    $guest = max(0, min(9, (int)($it['guest'] ?? 0)));
+    $gb = $guest ? ((int)($it['barber_id'] ?? 0) ?: null) : null;
+    if ($gb !== null && !in_array($gb, array_column(mhBarbers(), 'id'), true))
+      out(['ok' => false, 'error' => 'Thợ của người đi cùng không còn trong danh sách. Tải lại trang.'], 400);
+    $lines[] = ['svc' => $s, 'qty' => $qty, 'unit' => $unit, 'mdisc' => $md, 'detail' => $dt, 'guest' => $guest, 'barber_id' => $gb];
+    if ($s['kind'] === 'cut' && !$guest) $coCat = true;
   }
 
   /* Thợ: quầy bắt buộc chọn khi quán đã khai thợ — lương tính theo đây. */
@@ -450,7 +455,7 @@ case 'bill_create': {
   if ($c && $coCat && !$owner) {
     $st = db()->prepare("SELECT v.visit_time FROM visits v
                           WHERE v.customer_id = ? AND v.visit_date = ? AND v.void_at IS NULL
-                            AND EXISTS (SELECT 1 FROM visit_items i WHERE i.visit_id = v.id AND i.kind = 'cut')
+                            AND EXISTS (SELECT 1 FROM visit_items i WHERE i.visit_id = v.id AND i.kind = 'cut' AND i.guest = 0)
                           LIMIT 1");
     $st->execute([$cid, $date]);
     $gio = $st->fetchColumn();
@@ -469,10 +474,12 @@ case 'bill_create': {
                  $ghiChuGiam, $tip, $cash, $ck, $q['mdisc'], $lyDo, $owner ? 'owner' : 'counter',
                  mb_substr(trim((string)inp('note', '')), 0, 300), $bid, time(), $u['id'], $ref]);
   $vid = (int)$pdo->lastInsertId();
-  $ins = $pdo->prepare('INSERT INTO visit_items (visit_id, service_id, name, kind, qty, price, list_price, disc, mdisc, detail) VALUES (?,?,?,?,?,?,?,?,?,?)');
+  $ins = $pdo->prepare('INSERT INTO visit_items (visit_id, service_id, name, kind, qty, price, list_price, disc, mdisc, detail, guest, barber_id)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
   foreach ($lines as $i => $l)
     $ins->execute([$vid, $l['svc']['id'], $l['svc']['name'], $l['svc']['kind'], $l['qty'],
-                   $q['lines'][$i]['net'], $l['unit'], $q['lines'][$i]['disc'], $q['lines'][$i]['mdisc'], $l['detail']]);
+                   $q['lines'][$i]['net'], $l['unit'], $q['lines'][$i]['disc'], $q['lines'][$i]['mdisc'], $l['detail'],
+                   $l['guest'], $l['barber_id'] !== null && $l['barber_id'] !== $bid ? $l['barber_id'] : null]);
   $pdo->commit();
 
   if ($bk = (int)inp('booking_id', 0))
@@ -480,7 +487,7 @@ case 'bill_create': {
         ->execute([$vid, time(), $bk]);
   $moi = $c ? array_values(array_diff_key(pendingKeys($cid), $truoc)) : [];
   mhAudit($u['id'], 'bill_create', "#$vid " . ($c ? "khách #$cid" : 'khách lẻ') . ' · '
-          . implode(', ', array_map(function ($l) { return $l['svc']['name'] . ($l['detail'] !== '' ? ' (' . $l['detail'] . ')' : '')
+          . implode(', ', array_map(function ($l) { return ($l['guest'] ? '[bạn ' . $l['guest'] . '] ' : '') . $l['svc']['name'] . ($l['detail'] !== '' ? ' (' . $l['detail'] . ')' : '')
                                                          . ($l['qty'] > 1 ? ' x' . $l['qty'] : ''); }, $lines))
           . ' · ' . $q['total'] . ($tip ? " + tip $tip" : '') . ' · TM ' . $cash . ' / CK ' . $ck
           . ($q['mdisc'] ? ' · ⚠ giảm tay ' . $q['mdisc'] . ' (' . $lyDo . ')' : ''));
@@ -541,7 +548,8 @@ case 'report_add': {
     $v = $st->fetch();
     if (!$v) out(['ok' => false, 'error' => 'Không tìm thấy hoá đơn này.'], 404);
     /* Thợ chỉ báo được hoá đơn của mình, hoặc hoá đơn chưa ghi thợ (để nhận). */
-    if ($u['role'] === 'barber' && $v['barber_id'] !== null && (int)$v['barber_id'] !== $u['barber_id'])
+    $co = db()->prepare('SELECT 1 FROM visit_items WHERE visit_id = ? AND barber_id = ?'); $co->execute([$vid, (int)$u['barber_id']]);
+    if ($u['role'] === 'barber' && $v['barber_id'] !== null && (int)$v['barber_id'] !== $u['barber_id'] && !$co->fetchColumn())
       out(['ok' => false, 'error' => 'Hoá đơn này không phải của bạn.'], 403);
     $date = $v['visit_date'];
   } else {
@@ -590,7 +598,8 @@ case 'my_bills': {
     }
     return $ds;
   };
-  $rows = $che(mhVisitList('v.barber_id = ? AND v.visit_date BETWEEN ? AND ?', [$u['barber_id'], $tu, $den], 3000));
+  $rows = $che(mhVisitList('(v.barber_id = ? OR EXISTS (SELECT 1 FROM visit_items x WHERE x.visit_id = v.id AND x.barber_id = ?))
+                            AND v.visit_date BETWEEN ? AND ?', [$u['barber_id'], $u['barber_id'], $tu, $den], 3000));
   $chua = $che(mhVisitList("v.barber_id IS NULL AND v.void_at IS NULL AND v.source <> 'import' AND v.visit_date BETWEEN ? AND ?",
                            [$tu, $den], 300));
   $st = db()->prepare('SELECT r.*, u.name AS by_name, ru.name AS res_name FROM bill_reports r
@@ -598,7 +607,7 @@ case 'my_bills': {
                         WHERE r.created_by = ? AND r.report_date BETWEEN ? AND ? ORDER BY r.id DESC');
   $st->execute([$u['id'], $tu, $den]);
   $b = array_values(array_filter(mhBarbers(), function ($x) use ($u) { return $x['id'] === $u['barber_id']; }))[0] ?? null;
-  out(['ok' => true, 'month' => $m, 'barber' => $b ? $b['name'] : '', 'rows' => $rows, 'unassigned' => $chua,
+  out(['ok' => true, 'month' => $m, 'barber' => $b ? $b['name'] : '', 'barber_id' => $u['barber_id'], 'rows' => $rows, 'unassigned' => $chua,
        'reports' => array_map('mhReportRow', $st->fetchAll())]);
 }
 
@@ -811,7 +820,7 @@ case 'bills': {
   }
   $bid = (string)inp('barber', '');
   if ($bid === 'none') $w[] = 'v.barber_id IS NULL';
-  elseif ((int)$bid > 0) { $w[] = 'v.barber_id = ?'; $a[] = (int)$bid; }
+  elseif ((int)$bid > 0) { $w[] = '(v.barber_id = ? OR EXISTS (SELECT 1 FROM visit_items x WHERE x.visit_id = v.id AND x.barber_id = ?))'; $a[] = (int)$bid; $a[] = (int)$bid; }
   $only = (string)inp('only', '');
   $loc = ['report' => "EXISTS (SELECT 1 FROM bill_reports r WHERE r.visit_id = v.id AND r.status = 'open')", 'mdisc' => 'v.mdisc > 0', 'disc' => 'v.discount > 0', 'tip' => 'v.tip > 0',
           'void' => 'v.void_at IS NOT NULL', 'walkin' => 'v.customer_id IS NULL'];
@@ -1332,8 +1341,6 @@ case 'tiers_save': {
   if (!is_array($rows) || !$rows) out(['ok' => false, 'error' => 'Phải có ít nhất một hạng.'], 400);
   foreach (array_values($rows) as $i => $r) {
     if (trim((string)($r['name'] ?? '')) === '') out(['ok' => false, 'error' => 'Hạng thứ ' . ($i + 1) . ' chưa có tên.'], 400);
-    if ($i === 0 && ((int)($r['min_cuts'] ?? 0) > 0 || (int)($r['min_spend'] ?? 0) > 0))
-      out(['ok' => false, 'error' => 'Hạng đầu tiên là hạng khởi điểm — để cả hai ngưỡng bằng 0.'], 400);
   }
   $pdo = db();
   $pdo->beginTransaction();
@@ -1436,8 +1443,11 @@ case 'dashboard': {
   $moi = $q('SELECT COUNT(*) n FROM customers WHERE created_at >= ?', [strtotime($month . '-01')]);
   $qua = $q('SELECT COUNT(*) n FROM rewards_given WHERE given_at >= ?', [strtotime($month . '-01')]);
 
-  $tierCount = [];
-  foreach ($all as $c) if ($c['visits'] > 0) $tierCount[$c['tier_id']] = ($tierCount[$c['tier_id']] ?? 0) + 1;
+  $tierCount = []; $chuaHang = 0;
+  foreach ($all as $c) if ($c['visits'] > 0) {
+    if ($c['tier_id'] === null) { $chuaHang++; continue; }
+    $tierCount[$c['tier_id']] = ($tierCount[$c['tier_id']] ?? 0) + 1;
+  }
 
   $pending = [];
   foreach ($all as $c) if ($c['pending'])
@@ -1491,7 +1501,7 @@ case 'dashboard': {
        'month' => ['visits' => (int)$thg['n'], 'amount' => (int)$thg['s'], 'voided' => (int)$huy['n'],
                    'tip' => (int)$thg['t'], 'discount' => (int)$thg['d'], 'cash' => (int)$thg['cash'], 'transfer' => (int)$thg['ck'],
                    'new_customers' => (int)$moi['n'], 'gifts_given' => (int)$qua['n']],
-       'customers' => count($all),
+       'customers' => count($all), 'no_tier' => $chuaHang,
        'tiers' => array_map(function ($t) use ($tierCount) {
          return mhTierPublic($t) + ['count' => $tierCount[$t['id']] ?? 0]; }, mhTiers()),
        'pending' => array_slice($pending, 0, 60), 'pending_total' => array_sum(array_map(function ($p) { return count($p['gifts']); }, $pending)),

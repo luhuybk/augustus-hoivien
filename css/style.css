@@ -567,3 +567,13 @@ details.card>summary::-webkit-details-marker{display:none}
   .mday .mu{top:4px;right:4px}
   .mday .mo{display:none}
 }
+
+/* hoá đơn có người đi cùng */
+.pgroup{border:1px solid var(--line);border-radius:12px;padding:4px 10px 6px;margin:8px 0}
+.pgroup.on{border-color:var(--acc);background:rgba(214,165,74,.05)}
+.pghead{display:flex;align-items:center;gap:8px;padding:4px 0}
+.pgname{flex:1;text-align:left;font-weight:700;color:var(--tx);padding:4px 0}
+.pgname .dim{font-weight:400;font-size:12.5px}
+.pghead .inp.mini{width:auto;max-width:150px;padding:5px 8px;text-align:left}
+.pghead .x{width:30px;height:30px}
+.pgroup .pline:last-child{border-bottom:0}

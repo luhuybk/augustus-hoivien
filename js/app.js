@@ -319,6 +319,7 @@ const App = {
   posReset(){
     this.pos = {cus: null, q: '', rows: null, err: '', newCus: false, newPhone: '',
                 barber: null, lines: [], promo: 0, tip: '', mdReason: '', pay: '', given: '', cashPart: '',
+                guests: 0, target: 0, gBarber: {},
                 note: '', date: this.today, done: null,
                 /* Mã riêng của hoá đơn đang lập — mất mạng giữa chừng bấm lại
                    thì máy chủ trả hoá đơn cũ, không tạo hai lần. */
@@ -331,12 +332,14 @@ const App = {
     const st = this.pos, sv = this.posData.services || [];
     const lines = st.lines.map(l => {
       const s = sv.find(x => x.id === l.sid) || {price: 0, discountable: 0};
-      return {svc: s, qty: l.qty, unit: s.price || Number(l.price) || 0,
+      return {svc: s, qty: l.qty, unit: s.price || Number(l.price) || 0, guest: l.guest || 0,
               mdisc: l.mdOpen ? Number(String(l.mdisc || '').replace(/\D/g, '')) || 0 : 0};
     });
     const gross = lines.map(l => l.unit * l.qty);
     /* Món giảm thêm tay thì bỏ qua hạng / khuyến mãi. */
     const elig = lines.map((l, i) => l.svc.discountable && !l.mdisc ? i : -1).filter(i => i >= 0);
+    /* Giảm theo hạng chỉ cho khách chính, không cho bạn đi cùng. */
+    const hangIdx = elig.filter(i => !lines[i].guest);
     const chia = (tong, chon) => {
       const ra = {};
       const sum = chon.reduce((a, i) => a + gross[i], 0);
@@ -348,9 +351,9 @@ const App = {
     };
     /* Giảm % → làm tròn giá sau giảm của từng món (xuống 5k / 10k…). */
     const [buoc, kieu] = this.posData.round || [1000, 'down'];
-    const pct = p => {
+    const pct = (p, chon) => {
       const ra = {};
-      elig.forEach(i => {
+      chon.forEach(i => {
         const u = lines[i].unit;
         let con = u - Math.round(u * p / 100000) * 1000;
         con = kieu === 'near' ? Math.round(con / buoc) * buoc : Math.floor(con / buoc) * buoc;
@@ -361,9 +364,9 @@ const App = {
     const tong = o => Object.values(o).reduce((a, b) => a + b, 0);
     const t = st.cus && !st.cus.walkin && st.cus.tier ? st.cus.tier : null;
     const tierPct = t ? t.disc_pct || 0 : 0;
-    const tier = tierPct > 0 ? pct(tierPct) : {};
+    const tier = tierPct > 0 ? pct(tierPct, hangIdx) : {};
     const promo = (this.posData.promos || []).find(p => p.id === st.promo) || null;
-    const pro = promo ? (promo.kind === 'pct' ? pct(promo.value) : chia(promo.value, elig)) : {};
+    const pro = promo ? (promo.kind === 'pct' ? pct(promo.value, elig) : chia(promo.value, elig)) : {};
     const laKm = tong(pro) > tong(tier);
     const dung = laKm ? pro : tier;
     let note = tong(dung) > 0 ? (laKm ? 'KM: ' + promo.name : 'Hạng ' + t.name + ' −' + tierPct + '%') : '';
@@ -457,7 +460,8 @@ const App = {
       customer_id: st.cus && !st.cus.walkin ? st.cus.id : 0,
       barber_id: st.barber || 0,
       items: st.lines.map((l, i) => ({service_id: l.sid, qty: l.qty, price: Number(l.price) || undefined, mdisc: q.lines[i].mdisc,
-                                      detail: (l.detail || '').trim()})),
+                                      detail: (l.detail || '').trim(), guest: l.guest || 0,
+                                      barber_id: l.guest ? (st.gBarber || {})[l.guest] || 0 : 0})),
       promo_id: st.promo || 0, mdisc_reason: st.mdReason,
       tip: st.tipN, pay_cash: cash, pay_transfer: tong - cash, note: st.note,
       expect_total: q.total, date: API.isOwner() ? st.date : undefined, client_ref: st.ref, booking_id: st.booking || 0});
@@ -671,11 +675,12 @@ const App = {
       if (mc <= 0 && ms <= 0) return true;
       return (mc > 0 && c.cuts >= mc) || (ms > 0 && c.spend >= ms);
     };
+    dem.none = 0;
     (this.data.all || []).forEach(c => {
       if (!c.visits) return;
-      let k = 0;
+      let k = -1;
       ts.forEach((t, i) => { if (dat(t, c)) k = i; });
-      dem[k]++;
+      if (k < 0) dem.none++; else dem[k]++;
     });
     return dem;
   },
@@ -794,11 +799,12 @@ const App = {
         case 'posBarber':   this.pos.barber = this.pos.barber === id ? null : id; return this.drawPos();
         case 'posAdd': {
           const s = (this.posData.services || []).find(x => x.id === id);
-          const l = this.pos.lines.find(x => x.sid === id);
           /* Dịch vụ giá cố định bấm lại là thêm số lượng; sản phẩm nhập giá
              thì mỗi lần bấm một dòng — hai món giá khác nhau. */
-          if (l && s && s.price) l.qty++;
-          else this.pos.lines.push({sid: id, qty: 1, price: 0});
+          const g = this.pos.target || 0;
+          const l2 = this.pos.lines.find(x => x.sid === id && (x.guest || 0) === g);
+          if (l2 && s && s.price) l2.qty++;
+          else this.pos.lines.push({sid: id, qty: 1, price: 0, guest: g});
           this.drawPos();
           /* Sản phẩm: gõ tên trước (chọn tên cũ là giá tự điền), rồi tới giá. */
           const o = s && s.kind === 'product' ? document.querySelectorAll('[data-pdetail]')
@@ -926,6 +932,20 @@ const App = {
           this.drawPos();
           if (l.mdOpen){ const o = document.getElementById('posMd' + i); if (o) o.focus(); }
           return;
+        }
+        /* Người đi cùng: thêm một nhóm món, bấm tên nhóm để chọn nhóm đang thêm. */
+        case 'posGuestAdd':
+          this.pos.guests = (this.pos.guests || 0) + 1;
+          this.pos.target = this.pos.guests;
+          return this.drawPos();
+        case 'posTarget': this.pos.target = Number(el.dataset.g); return this.drawPos();
+        case 'posGuestDel': {
+          const g = Number(el.dataset.g), st = this.pos, gb = {};
+          st.lines = st.lines.filter(l => (l.guest || 0) !== g);
+          st.lines.forEach(l => { if (l.guest > g) l.guest--; });
+          Object.keys(st.gBarber || {}).forEach(k => { const n = Number(k); if (n < g) gb[n] = st.gBarber[k]; if (n > g) gb[n - 1] = st.gBarber[k]; });
+          st.gBarber = gb; st.guests--; st.target = Math.min(st.target, st.guests);
+          return this.drawPos();
         }
         case 'posQty': {
           const i = Number(el.dataset.i), l = this.pos.lines[i];
@@ -1427,6 +1447,7 @@ const App = {
     }
     if (t.id === 'posPromo'){ this.pos.promo = Number(t.value); return this.drawPos(); }
     if (t.id === 'posDate'){ this.pos.date = t.value; return; }
+    if (t.dataset.gb){ (this.pos.gBarber = this.pos.gBarber || {})[Number(t.dataset.gb)] = Number(t.value) || 0; return; }
 
     if (t.dataset.vb) return this.changeBarber(Number(t.dataset.vb), Number(t.value));
     this.bindField(t);
@@ -1448,6 +1469,7 @@ const App = {
       if (/^min_/.test(t.dataset.f)){
         const dem = this.tierCounts();
         dem.forEach((n, i) => { const b = document.getElementById('tc' + i); if (b) b.textContent = n + ' khách'; });
+        const kh = document.getElementById('tcNone'); if (kh) kh.textContent = dem.none;
       }
     } else if (t.dataset.bb){
       this.data.barberEdit[Number(t.dataset.bb)][t.dataset.f] = t.dataset.f === 'base_salary' ? Number(String(val).replace(/\D/g, '')) || 0 : val;
