@@ -163,6 +163,11 @@ function mhMigrate(PDO $pdo): void {
   /* Tên sản phẩm cụ thể trên dòng "Sản phẩm A – 12%"; tài khoản thợ. */
   mhAddColumn($pdo, 'visit_items', 'detail', "TEXT NOT NULL DEFAULT ''");
   mhAddColumn($pdo, 'users', 'barber_id', 'INTEGER');
+  /* Khách dẫn bạn đi cùng, tính chung một hoá đơn (không tạo khách mới cho
+     người bạn): dòng của bạn đi cùng có guest > 0 và có thể có thợ riêng. */
+  mhAddColumn($pdo, 'visit_items', 'guest', 'INTEGER NOT NULL DEFAULT 0');
+  mhAddColumn($pdo, 'visit_items', 'barber_id', 'INTEGER');
+
   /* Mạng chập chờn: máy chủ đã ghi hoá đơn nhưng quầy không nhận được trả
      lời, bấm lại → nhận lại đúng hoá đơn cũ thay vì tạo hoá đơn thứ hai. */
   mhAddColumn($pdo, 'visits', 'client_ref', 'TEXT');
@@ -598,11 +603,14 @@ function mhBdayState(array $c, ?array $tier, bool $daNhan): array {
 /* Số lượt cắt, tổng chi, lượt gần nhất — của một khách, hoặc của tất cả
    (trả về mảng theo customer_id). Lượt đã huỷ không tính. */
 function mhStats(?int $cid = null): array {
+  /* Dòng của bạn đi cùng (guest > 0) không tính vào lần cắt / tổng chi của
+     khách chính — dẫn bạn đi không làm mình lên hạng nhanh hơn. */
   $sql = "SELECT v.customer_id AS cid,
                  COUNT(*) AS visits,
-                 COALESCE(SUM(v.amount), 0) AS spend,
+                 COALESCE(SUM(v.amount - COALESCE((SELECT SUM(g.price) FROM visit_items g
+                                                    WHERE g.visit_id = v.id AND g.guest > 0), 0)), 0) AS spend,
                  SUM(CASE WHEN EXISTS (SELECT 1 FROM visit_items i
-                                        WHERE i.visit_id = v.id AND i.kind = 'cut')
+                                        WHERE i.visit_id = v.id AND i.kind = 'cut' AND i.guest = 0)
                           THEN 1 ELSE 0 END) AS cuts,
                  MAX(v.visit_date) AS last
             FROM visits v
@@ -648,7 +656,7 @@ function mhProgramCounts(array $p, ?int $cid = null): array {
   $args = [$p['start_date']];
   if ($p['end_date'] !== '') { $sql .= ' AND v.visit_date <= ?'; $args[] = $p['end_date']; }
   if ($p['kind'] !== 'any') {
-    $sql .= ' AND EXISTS (SELECT 1 FROM visit_items i WHERE i.visit_id = v.id AND i.kind = ?)';
+    $sql .= ' AND EXISTS (SELECT 1 FROM visit_items i WHERE i.visit_id = v.id AND i.kind = ? AND i.guest = 0)';
     $args[] = $p['kind'];
   }
   if ($cid) { $sql .= ' AND v.customer_id = ?'; $args[] = $cid; }
@@ -888,13 +896,16 @@ function mhVisitList(string $where, array $args, int $limit = 200): array {
   if (!$rows) return [];
   $ids = array_map(function ($r) { return (int)$r['id']; }, $rows);
   $items = [];
-  $q = db()->query('SELECT visit_id, service_id, name, kind, qty, price, list_price, disc, mdisc, detail FROM visit_items WHERE visit_id IN ('
-                   . implode(',', $ids) . ') ORDER BY id');
+  $q = db()->query('SELECT i.visit_id, i.service_id, i.name, i.kind, i.qty, i.price, i.list_price, i.disc, i.mdisc, i.detail,
+                           i.guest, i.barber_id, b.name AS barber_name
+                      FROM visit_items i LEFT JOIN barbers b ON b.id = i.barber_id WHERE i.visit_id IN ('
+                   . implode(',', $ids) . ') ORDER BY i.id');
   foreach ($q->fetchAll() as $i)
     $items[(int)$i['visit_id']][] = ['name' => $i['name'], 'kind' => $i['kind'], 'service_id' => $i['service_id'] !== null ? (int)$i['service_id'] : null,
                                      'qty' => (int)$i['qty'], 'price' => (int)$i['price'],
                                      'list_price' => (int)$i['list_price'], 'disc' => (int)$i['disc'], 'mdisc' => (int)$i['mdisc'],
-                                     'detail' => (string)$i['detail']];
+                                     'detail' => (string)$i['detail'], 'guest' => (int)$i['guest'],
+                                     'barber_id' => $i['barber_id'] !== null ? (int)$i['barber_id'] : null, 'barber_name' => $i['barber_name']];
   /* Báo sai đính kèm từng hoá đơn. */
   $bao = [];
   $q = db()->query('SELECT r.*, u.name AS by_name, ru.name AS res_name FROM bill_reports r
@@ -997,10 +1008,12 @@ function mhQuote(array $lines, int $tierPct, string $tierName, ?array $promo, ?a
   $eligIdx = array_keys(array_filter($lines, function ($l) {
     return (int)$l['svc']['discountable'] === 1 && empty($l['mdisc']);
   }));
+  /* Giảm theo hạng là quyền của khách chính — bạn đi cùng không được. */
+  $hangIdx = array_values(array_filter($eligIdx, function ($i) use ($lines) { return empty($lines[$i]['guest']); }));
 
-  $pct = function (int $p) use ($eligIdx, $lines, $buoc, $kieu) {
+  $pct = function (int $p, array $chon) use ($lines, $buoc, $kieu) {
     $ra = [];
-    foreach ($eligIdx as $i) {
+    foreach ($chon as $i) {
       $u = $lines[$i]['unit'];
       $con = $u - (int)round($u * $p / 100000) * 1000;
       $con = $kieu === 'near' ? (int)round($con / $buoc) * $buoc : intdiv($con, $buoc) * $buoc;
@@ -1008,9 +1021,9 @@ function mhQuote(array $lines, int $tierPct, string $tierName, ?array $promo, ?a
     }
     return $ra;
   };
-  $tier = $tierPct > 0 ? $pct($tierPct) : [];
+  $tier = $tierPct > 0 ? $pct($tierPct, $hangIdx) : [];
   $pro  = [];
-  if ($promo) $pro = $promo['kind'] === 'pct' ? $pct((int)$promo['value']) : $chia((int)$promo['value'], $eligIdx);
+  if ($promo) $pro = $promo['kind'] === 'pct' ? $pct((int)$promo['value'], $eligIdx) : $chia((int)$promo['value'], $eligIdx);
   $laKm = array_sum($pro) > array_sum($tier);
   $dung = $laKm ? $pro : $tier;
   $note = '';
@@ -1112,10 +1125,22 @@ function mhPayroll(string $month): array {
     $tho[$b]['revenue'] += (int)$v['amount'];
     $tho[$b]['tip'] += (int)$v['tip'];
   }
-  $st = db()->prepare("SELECT v.barber_id, i.service_id, i.name, SUM(i.qty) q, SUM(i.price) p FROM visit_items i
-                         JOIN visits v ON v.id = i.visit_id
-                        WHERE v.void_at IS NULL AND v.barber_id IS NOT NULL AND v.visit_date LIKE ?
-                        GROUP BY v.barber_id, COALESCE(i.service_id, -1), CASE WHEN i.service_id IS NULL THEN i.name END");
+  /* Dòng của bạn đi cùng do thợ khác làm thì về thợ đó: chuyển doanh thu
+     và tính thêm một hoá đơn cho thợ đó. */
+  $st = db()->prepare("SELECT v.barber_id vb, i.barber_id ib, SUM(i.price) p FROM visit_items i JOIN visits v ON v.id = i.visit_id
+                        WHERE v.void_at IS NULL AND v.visit_date LIKE ? AND i.barber_id IS NOT NULL
+                          AND (v.barber_id IS NULL OR i.barber_id <> v.barber_id)
+                        GROUP BY v.id, i.barber_id");
+  $st->execute([$month . '-%']);
+  foreach ($st->fetchAll() as $r) {
+    $ib = (int)$r['ib']; $vb = $r['vb'] !== null ? (int)$r['vb'] : null;
+    if ($vb !== null && isset($tho[$vb])) $tho[$vb]['revenue'] -= (int)$r['p'];
+    if (isset($tho[$ib])) { $tho[$ib]['revenue'] += (int)$r['p']; $tho[$ib]['bills']++; }
+  }
+  $st = db()->prepare("SELECT COALESCE(i.barber_id, v.barber_id) AS barber_id, i.service_id, i.name, SUM(i.qty) q, SUM(i.price) p
+                         FROM visit_items i JOIN visits v ON v.id = i.visit_id
+                        WHERE v.void_at IS NULL AND COALESCE(i.barber_id, v.barber_id) IS NOT NULL AND v.visit_date LIKE ?
+                        GROUP BY COALESCE(i.barber_id, v.barber_id), COALESCE(i.service_id, -1), CASE WHEN i.service_id IS NULL THEN i.name END");
   $st->execute([$month . '-%']);
   foreach ($st->fetchAll() as $r) {
     $b = (int)$r['barber_id'];

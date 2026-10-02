@@ -178,7 +178,9 @@ CREATE TABLE IF NOT EXISTS visit_items (
   list_price  INTEGER NOT NULL DEFAULT 0,    -- đơn giá niêm yết lúc bán
   disc        INTEGER NOT NULL DEFAULT 0,    -- giảm giá của dòng (gồm cả giảm tay)
   mdisc       INTEGER NOT NULL DEFAULT 0,    -- phần giảm thêm bằng tay của dòng
-  detail      TEXT    NOT NULL DEFAULT ''    -- tên sản phẩm cụ thể (Wax Reuzel…)
+  detail      TEXT    NOT NULL DEFAULT '',   -- tên sản phẩm cụ thể (Wax Reuzel…)
+  guest       INTEGER NOT NULL DEFAULT 0,    -- 0 = khách chính; 1, 2… = bạn đi cùng, tính chung hoá đơn
+  barber_id   INTEGER                        -- thợ làm món này nếu khác thợ của hoá đơn (bạn đi cùng)
 );
 CREATE INDEX IF NOT EXISTS idx_item_visit ON visit_items(visit_id);
 CREATE INDEX IF NOT EXISTS idx_item_kind  ON visit_items(kind, visit_id);

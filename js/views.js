@@ -20,6 +20,8 @@ const tenMon = i => i.name + (i.detail ? ' · ' + i.detail : '');
 const hm = m => String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
 const THU = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
 const thuCua = d => THU[new Date(d + 'T00:00:00').getDay()];
+/* Số người đi cùng tính chung hoá đơn. */
+const soBan = v => Math.max(0, ...(v.items || []).map(i => i.guest || 0));
 const ngay = d => d ? d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4) : '';
 const ngayNgan = d => d ? d.slice(8, 10) + '/' + d.slice(5, 7) : '';
 
@@ -202,7 +204,7 @@ const Views = {
     const bd = d.bday || {};
     const dacQuyen = `<div class="card">
         <h3>Đặc quyền ${t ? 'hạng ' + esc(t.name) : ''}</h3>
-        ${dqNay.length ? perkList(dqNay) : '<div class="dim">Hạng này chưa có đặc quyền nào.</div>'}
+        ${dqNay.length ? perkList(dqNay) : `<div class="dim">${t ? 'Hạng này chưa có đặc quyền nào.' : 'Khách chưa lên hạng — chưa được giảm giá.'}</div>`}
         ${dqSau.length ? `<div class="dim" style="margin-top:10px">Lên ${tierBadge(nx.tier)} có thêm:</div>${perkList(dqSau, 'next')}` : ''}
       </div>`;
 
@@ -218,7 +220,7 @@ const Views = {
             <div class="dim num">${esc(c.phone)}${c.kv_code ? ' · ' + esc(c.kv_code) : ''}
               ${bd.birthday ? ` · <span class="${bd.this_month ? 'sn-nay' : ''}">🎂 ${ngaySinh(bd.birthday)}${bd.year ? '/' + bd.year : ''}${bd.days === 0 ? ' — hôm nay!' : bd.days <= 7 ? ' — còn ' + bd.days + ' ngày' : ''}</span>` : ''}</div>
           </div>
-          ${tierBadge(t, true)}
+          ${t ? tierBadge(t, true) : '<span class="badge">Chưa có hạng</span>'}
         </div>
         <div class="dim" style="margin-top:10px">${s.cuts} lần cắt · ${s.visits} lượt ghé · đã chi ${tien(s.spend)}
           ${s.last ? ' · gần nhất ' + ngay(s.last) : ''}</div>
@@ -311,7 +313,7 @@ const Views = {
           ? `<button class="link" data-act="open" data-id="${v.customer_id}" style="padding:0">${esc(v.customer_name || '(chưa tên)')}</button>
              <span class="dim num"> ${esc(v.customer_phone || '')}</span><br>`
           : '<span class="dim">Khách lẻ</span><br>') : ''}
-        <b>${esc(v.items.map(i => tenMon(i) + (i.qty > 1 ? ' ×' + i.qty : '')).join(', ') || '—')}</b>
+        <b>${esc(v.items.map(i => tenMon(i) + (i.qty > 1 ? ' ×' + i.qty : '') + (i.guest ? ' (bạn đi cùng)' : '')).join(', ') || '—')}</b>
         <div class="sub num">${showCustomer ? '' : ngay(v.visit_date) + ' '}${esc(v.visit_time)} · <b>${tien(v.amount)}</b>
           ${v.discount ? ` <span class="dim">(giảm ${tienGon(v.discount)}${v.disc_note ? ' · ' + esc(v.disc_note) : ''})</span>` : ''}
           ${v.tip ? ' · tip ' + tienGon(v.tip) : ''}${tra ? ' · ' + tra : ''}
@@ -412,7 +414,7 @@ const Views = {
            <button class="btn sm" data-act="posNewCus">+ Khách mới</button>
            <button class="btn sm" data-act="posWalkin">Khách lẻ (không lấy số)</button></div>`;
 
-    const lines = st.lines.map((l, i) => {
+    const dongMon = (l, i) => {
       const s = sv.find(x => x.id === l.sid);
       if (!s) return '';
       const r = q.lines[i] || {};
@@ -434,7 +436,21 @@ const Views = {
           <button data-act="posQty" data-i="${i}" data-d="1" aria-label="Thêm">+</button></div>
         <b class="num" id="pnet${i}" style="min-width:76px;text-align:right">${r.net != null ? tien(r.net) : ''}</b>
       </div>`;
-    }).join('');
+    };
+    /* Khách dẫn bạn đi cùng: mỗi người một nhóm món, bấm tên nhóm để chọn
+       nhóm đang thêm món vào; bạn đi cùng chọn được thợ riêng. */
+    const soNguoi = st.guests || 0;
+    const tenChinh = st.cus ? (st.cus.walkin ? 'Khách lẻ' : st.cus.name || 'Khách') : 'Khách chính';
+    const nhomMon = g => st.lines.map((l, i) => (l.guest || 0) === g ? dongMon(l, i) : '').join('');
+    const lines = !soNguoi ? nhomMon(0) : [0].concat(Array.from({length: soNguoi}, (_, k) => k + 1)).map(g => `
+      <div class="pgroup${st.target === g ? ' on' : ''}">
+        <div class="pghead"><button class="pgname" data-act="posTarget" data-g="${g}">${g ? '👥 Bạn đi cùng ' + g : '👤 ' + esc(tenChinh)}
+          ${st.target === g ? '<span class="dim">· đang thêm món vào đây</span>' : '<span class="dim">· bấm để thêm món</span>'}</button>
+          ${g && (data.barbers || []).length ? `<select class="inp mini" data-gb="${g}" title="Thợ làm cho người này">
+              <option value="0">✂︎ cùng thợ</option>${data.barbers.map(b => `<option value="${b.id}"${(st.gBarber || {})[g] === b.id ? ' selected' : ''}>✂︎ ${esc(b.name)}</option>`).join('')}</select>
+            <button class="x" data-act="posGuestDel" data-g="${g}" aria-label="Bỏ người đi cùng">×</button>` : ''}</div>
+        ${nhomMon(g) || '<div class="dim" style="padding:6px 0">Chưa có món — bấm dịch vụ bên ' + (window.innerWidth >= 900 ? 'trái' : 'trên') + '.</div>'}
+      </div>`).join('');
 
     const tongTra = q.total + st.tipN;
     const tra = st.pay === 'cash' ? `<div class="grid2" style="margin-top:10px">
@@ -472,7 +488,9 @@ const Views = {
       </div><div class="posright">
         <div class="card bill">
           <h3>Hoá đơn</h3>
-          ${st.lines.length ? lines : `<div class="dim" style="padding:8px 0">Bấm dịch vụ bên ${window.innerWidth >= 900 ? 'trái' : 'trên'} để thêm vào hoá đơn.</div>`}
+          ${st.lines.length || soNguoi ? lines : `<div class="dim" style="padding:8px 0">Bấm dịch vụ bên ${window.innerWidth >= 900 ? 'trái' : 'trên'} để thêm vào hoá đơn.</div>`}
+          ${st.cus ? `<button class="link" data-act="posGuestAdd" style="padding:8px 0 0">+ Người đi cùng (bạn của khách, tính chung hoá đơn)</button>
+            ${soNguoi ? '<div class="dim" style="font-size:12.5px">Món của bạn đi cùng không tính vào hạng / mốc quà của khách chính và không giảm theo hạng.</div>' : ''}` : ''}
           ${(data.promos || []).length ? `<div class="field" style="margin:12px 0 0"><label>Khuyến mãi</label>
             <select class="inp" id="posPromo"><option value="0">— Không —</option>
               ${data.promos.map(p => `<option value="${p.id}"${st.promo === p.id ? ' selected' : ''}>${esc(p.name)} (−${p.kind === 'pct' ? p.value + '%' : tienGon(p.value)})</option>`).join('')}
@@ -564,7 +582,7 @@ const Views = {
 
   /* Hoá đơn in khổ 80mm (máy in nhiệt) — vừa cả khổ A5 nếu in giấy thường. */
   receipt(v, shop){
-    const dong = v.items.map(i => `<tr><td>${esc(tenMon(i))}${i.qty > 1 ? ' ×' + i.qty : ''}
+    const dong = v.items.map(i => `<tr><td>${esc(tenMon(i))}${i.qty > 1 ? ' ×' + i.qty : ''}${i.guest ? ' <span class="s">(bạn đi cùng)</span>' : ''}
         ${i.disc ? `<div class="s">${tien(i.list_price)} − ${tien(i.disc)}</div>` : ''}</td>
       <td class="r">${tien(i.price)}</td></tr>`).join('');
     return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(v.code)}</title><style>
@@ -605,12 +623,19 @@ const Views = {
     const chuaGhi = con.filter(v => v.pay_cash + v.pay_transfer === 0);
 
     const tho = new Map();
+    const lay = k => tho.get(k) || (tho.set(k, {bill: 0, cut: 0, dt: 0, tip: 0}), tho.get(k));
     con.forEach(v => {
-      const k = v.barber_name || '— chưa ghi thợ';
-      const t = tho.get(k) || {bill: 0, cut: 0, dt: 0, tip: 0};
-      t.bill++; t.dt += v.amount; t.tip += v.tip;
-      t.cut += v.items.filter(i => i.kind === 'cut').reduce((a, i) => a + i.qty, 0);
-      tho.set(k, t);
+      /* Món của bạn đi cùng do thợ khác làm thì tính cho thợ đó. */
+      const chinh = v.barber_name || '— chưa ghi thợ';
+      const coMat = new Set([chinh]);
+      lay(chinh).bill++; lay(chinh).tip += v.tip;
+      if (!v.items.length) lay(chinh).dt += v.amount;
+      v.items.forEach(i => {
+        const k = i.barber_name || chinh, t = lay(k);
+        if (!coMat.has(k)){ coMat.add(k); t.bill++; }
+        t.dt += i.price;
+        if (i.kind === 'cut') t.cut += i.qty;
+      });
     });
     const dv = new Map();
     con.forEach(v => v.items.forEach(i => {
@@ -683,7 +708,7 @@ const Views = {
     const tra = v.pay_cash && v.pay_transfer ? '💵🏦' : v.pay_cash ? '💵' : v.pay_transfer ? '🏦' : '';
     return `<details class="brow${huy ? ' void' : ''}${v.mdisc && !huy ? ' md' : ''}"><summary>
       <span class="bt num">${esc(v.visit_time || '—')}</span>
-      <span class="bk">${v.customer_id ? esc(v.customer_name || '(chưa tên)') : '<i class="dim">Khách lẻ</i>'}
+      <span class="bk">${v.customer_id ? esc(v.customer_name || '(chưa tên)') : '<i class="dim">Khách lẻ</i>'}${soBan(v) ? ` <b class="dim">+${soBan(v)}</b>` : ''}
         ${huy ? '<span class="badge bad">huỷ</span>' : ''}${v.mdisc && !huy ? '<span class="badge warn">⚠ giảm tay</span>' : ''}${(v.reports || []).some(r => r.status === 'open') ? '<span class="badge bad">📣 báo sai</span>' : ''}</span>
       <span class="bp num dim">${esc(v.customer_phone || '')}</span>
       <span class="ba num"><b>${tien(v.amount)}</b> <small title="${v.pay_cash && v.pay_transfer ? 'Tiền mặt + chuyển khoản' : v.pay_cash ? 'Tiền mặt' : 'Chuyển khoản'}">${tra}</small></span>
@@ -693,7 +718,8 @@ const Views = {
 
   billDetail(v){
     const huy = v.void_at != null;
-    const dong = v.items.map(i => `<tr${i.mdisc ? ' class="md"' : ''}><td>${esc(i.name)}${i.detail ? `<div class="pdname">${esc(i.detail)}</div>` : ''}</td><td class="r num">${i.qty}</td>
+    const dong = v.items.map(i => `<tr${i.mdisc ? ' class="md"' : ''}><td>${esc(i.name)}${i.detail ? `<div class="pdname">${esc(i.detail)}</div>` : ''}
+      ${i.guest ? `<div class="pdname">👥 bạn đi cùng ${i.guest}${i.barber_name ? ' · ✂︎ ' + esc(i.barber_name) : ''}</div>` : ''}</td><td class="r num">${i.qty}</td>
       <td class="r num">${i.list_price ? tien(i.list_price) : ''}</td>
       <td class="r num">${i.disc ? (i.mdisc ? '⚠ ' : '') + '−' + tien(i.disc) : ''}</td><td class="r num"><b>${tien(i.price)}</b></td></tr>`).join('');
     const giamKhac = v.discount - (v.mdisc || 0);
@@ -1101,7 +1127,9 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
   mine(d){
     const con = d.rows.filter(v => !v.void_at);
     const mon = new Map();
-    con.forEach(v => v.items.forEach(i => { const t = mon.get(i.name) || {n: 0, dt: 0}; t.n += i.qty; t.dt += i.price; mon.set(i.name, t); }));
+    con.forEach(v => v.items.filter(i => (i.barber_id || v.barber_id) === d.barber_id).forEach(i => {
+      const t = mon.get(i.name) || {n: 0, dt: 0}; t.n += i.qty; t.dt += i.price; mon.set(i.name, t); }));
+    const monToi = v => v.items.filter(i => (i.barber_id || v.barber_id) === d.barber_id);
     const nay = App.today.slice(0, 7);
     const truoc = (() => { const [y, m] = d.month.split('-').map(Number); return m === 1 ? (y - 1) + '-12' : y + '-' + String(m - 1).padStart(2, '0'); })();
     const sau = (() => { const [y, m] = d.month.split('-').map(Number); return m === 12 ? (y + 1) + '-01' : y + '-' + String(m + 1).padStart(2, '0'); })();
@@ -1113,9 +1141,9 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
         Soát lại từng hoá đơn — thiếu hay sai thì bấm <b>📣 Báo sai</b> trong hoá đơn, hoặc báo thiếu ở cuối trang.</p>
       <div class="stats">
         <div class="stat"><div class="n">${con.length}</div><div class="l">hoá đơn</div></div>
-        <div class="stat"><div class="n">${con.reduce((a, v) => a + v.items.filter(i => i.kind === 'cut').reduce((b, i) => b + i.qty, 0), 0)}</div><div class="l">lượt cắt</div></div>
-        <div class="stat"><div class="n">${tienGon(con.reduce((a, v) => a + v.amount, 0))}</div><div class="l">doanh thu</div></div>
-        <div class="stat"><div class="n">${tienGon(con.reduce((a, v) => a + v.tip, 0))}</div><div class="l">tip đã nhận</div></div>
+        <div class="stat"><div class="n">${con.reduce((a, v) => a + monToi(v).filter(i => i.kind === 'cut').reduce((b, i) => b + i.qty, 0), 0)}</div><div class="l">lượt cắt</div></div>
+        <div class="stat"><div class="n">${tienGon(con.reduce((a, v) => a + (v.items.length ? monToi(v).reduce((b, i) => b + i.price, 0) : v.amount), 0))}</div><div class="l">doanh thu</div></div>
+        <div class="stat"><div class="n">${tienGon(con.reduce((a, v) => a + (v.barber_id === d.barber_id ? v.tip : 0), 0))}</div><div class="l">tip đã nhận</div></div>
       </div>
       ${mon.size ? `<div class="card"><h3>Đếm theo món</h3><div class="tblwrap" style="border:0"><table class="tbl" style="font-size:13.5px">
         <thead><tr><th>Món</th><th class="r">SL</th><th class="r">Thành tiền</th></tr></thead>
@@ -1495,6 +1523,7 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
           ${d.tiers.map(t => `<div class="tbar"><div class="t">${tierBadge(t)}</div>
             <div class="b"><i style="width:${(t.count / tong * 100).toFixed(1)}%;${tierStyle(t.color)}"></i></div>
             <div class="c">${t.count}</div></div>`).join('')}
+          ${d.no_tier ? `<div class="dim" style="margin-bottom:4px">Chưa lên hạng: <b>${d.no_tier}</b> khách</div>` : ''}
           <div class="dim">${d.customers} khách trong danh sách · ${d.month.new_customers} khách mới tháng này</div>
         </div>
         ${d.barbers.length || d.no_barber ? `<div class="card"><h3>Thợ cắt tháng này</h3>
@@ -1546,7 +1575,7 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
     opt = opt || {};
     const q = App.fold(st.q || '');
     const soQ = (st.q || '').replace(/\D/g, '');
-    let rows = all.filter(c => (!st.tier || c.tier_id === st.tier)
+    let rows = all.filter(c => (!st.tier || c.tier_id === st.tier) && (st.only !== 'notier' || (c.visits && c.tier_id == null))
       && (!q || App.fold(c.name).includes(q) || (soQ.length >= 3 && c.phone.includes(soQ))));
     if (st.only === 'gift') rows = rows.filter(c => c.pending.length);
     if (st.only === 'flag') rows = rows.filter(c => c.flagged);
@@ -1605,6 +1634,7 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
       <div class="chips">
         <button class="chip${!st.tier && !st.only ? ' on' : ''}" data-act="cf" data-k="all">Tất cả</button>
         ${tiers.map(t => `<button class="chip${st.tier === t.id ? ' on' : ''}" data-act="cf" data-k="tier" data-v="${t.id}">${esc(t.name)}</button>`).join('')}
+        ${all.some(c => c.visits && c.tier_id == null) ? `<button class="chip${st.only === 'notier' ? ' on' : ''}" data-act="cf" data-k="notier">Chưa lên hạng (${all.filter(c => c.visits && c.tier_id == null).length})</button>` : ''}
         <button class="chip${st.only === 'gift' ? ' on' : ''}" data-act="cf" data-k="gift">🎁 Chờ quà</button>
         <button class="chip${st.only === 'flag' ? ' on' : ''}" data-act="cf" data-k="flag">⚠︎ Có cờ</button>
         <button class="chip${st.only === 'bday' ? ' on' : ''}" data-act="cf" data-k="bday">🎂 Sinh nhật tháng này</button>
@@ -1714,8 +1744,10 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
         <div id="tierPreview">${this.tierPreview(rows, round, svc)}</div>
       </div>
       <p class="note">Cộng dồn trọn đời, đạt <b>một trong hai</b> ngưỡng là lên hạng. Ngưỡng để 0 là không xét.
-        Hạng đầu tiên là hạng khởi điểm của mọi khách.
+        Hạng đầu tiên để cả hai ngưỡng bằng 0 thì mọi khách có hạng ngay từ lần đầu; đặt ngưỡng (vd. từ 3 lần cắt)
+        thì khách mới <b>chưa có hạng</b> — chưa được giảm giá — tới khi đạt.
         ${dem ? 'Số bên phải mỗi hạng là số khách sẽ nằm ở hạng đó <b>với ngưỡng đang gõ</b>.' : ''}</p>
+      ${dem ? `<p class="dim" style="margin-top:-4px">Chưa lên hạng: <b id="tcNone">${dem.none || 0}</b> khách</p>` : ''}
       ${rows.map((t, i) => `<div class="erow">
         <div class="row"><b class="grow">${tierBadge(t, true)}</b>
           ${dem ? `<span class="badge" id="tc${i}">${dem[i]} khách</span>` : ''}
@@ -1725,8 +1757,8 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
           <div><label>Màu</label><input type="color" data-tier="${i}" data-f="color" value="${esc(t.color)}"></div>
           <div><label>% giảm mỗi bill (dịch vụ được giảm)</label><input inputmode="numeric" data-tier="${i}" data-f="disc_pct" value="${t.disc_pct || ''}" placeholder="0 = không giảm"></div>
           <div></div>
-          ${i > 0 ? `<div><label>Từ số lần cắt</label><input inputmode="numeric" data-tier="${i}" data-f="min_cuts" value="${t.min_cuts || ''}" placeholder="0 = không xét"></div>
-          <div><label>Hoặc tổng chi từ (đ)</label><input inputmode="numeric" data-tier="${i}" data-f="min_spend" data-money value="${soTien(t.min_spend)}" placeholder="0 = không xét"></div>` : ''}
+          <div><label>Từ số lần cắt</label><input inputmode="numeric" data-tier="${i}" data-f="min_cuts" value="${t.min_cuts || ''}" placeholder="0 = không xét"></div>
+          <div><label>Hoặc tổng chi từ (đ)</label><input inputmode="numeric" data-tier="${i}" data-f="min_spend" data-money value="${soTien(t.min_spend)}" placeholder="0 = không xét"></div>
         </div>
         <div style="margin-top:8px"><label>🎂 Quà sinh nhật (để trống = hạng này không có) — quầy sẽ hỏi ngày sinh khách từ hạng này</label>
           <input data-tier="${i}" data-f="bday_gift" value="${esc(t.bday_gift || '')}" placeholder="vd. Gội dưỡng miễn phí"></div>
