@@ -147,6 +147,7 @@ CREATE TABLE IF NOT EXISTS visits (
   mdisc       INTEGER NOT NULL DEFAULT 0,    -- giảm thêm bằng tay (đ) — có ⚠ khi chốt ca
   mdisc_note  TEXT    NOT NULL DEFAULT '',   -- lý do giảm thêm, bắt buộc khi mdisc > 0
   client_ref  TEXT,                          -- mã máy quầy sinh cho mỗi hoá đơn: gửi lại không tạo hai lần
+  promo_id    INTEGER,                       -- khuyến mãi đã thật sự áp (để chặn "mỗi khách một lần")
   source      TEXT    NOT NULL DEFAULT 'counter',
   kv_invoice  TEXT,                          -- mã hoá đơn KiotViet đã khớp
   flags       TEXT    NOT NULL DEFAULT '',   -- NO_INVOICE: đối soát không thấy hoá đơn
@@ -258,7 +259,18 @@ CREATE TABLE IF NOT EXISTS promos (
   end_date    TEXT    NOT NULL DEFAULT '',
   active      INTEGER NOT NULL DEFAULT 1,
   sort        INTEGER NOT NULL DEFAULT 0,
-  created_at  INTEGER NOT NULL
+  created_at  INTEGER NOT NULL,
+  /* Điều kiện app tự kiểm — để trống là không giới hạn. */
+  svc_ids     TEXT    NOT NULL DEFAULT '',   -- chỉ giảm các dịch vụ này ('3,7')
+  weekdays    TEXT    NOT NULL DEFAULT '',   -- chỉ các thứ này (0 = CN … 6 = T7)
+  time_from   TEXT    NOT NULL DEFAULT '',   -- 'HH:MM' — khung giờ trong ngày
+  time_to     TEXT    NOT NULL DEFAULT '',
+  min_total   INTEGER NOT NULL DEFAULT 0,    -- tổng tiền hàng tối thiểu
+  new_only    INTEGER NOT NULL DEFAULT 0,    -- chỉ khách lần đầu đến
+  once_per    INTEGER NOT NULL DEFAULT 0,    -- mỗi khách chỉ dùng một lần
+  /* Điều kiện app không kiểm được (follow fanpage…) và câu nói với khách. */
+  cond_note   TEXT    NOT NULL DEFAULT '',
+  pitch       TEXT    NOT NULL DEFAULT ''
 );
 
 /* ---------------- lương ---------------- */
@@ -409,3 +421,63 @@ CREATE TABLE IF NOT EXISTS barber_off (
   created_by  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_off_date ON barber_off(off_date);
+
+/* ---------------- việc ở tiệm ---------------- */
+
+/* Việc chủ (hoặc nhân viên) đặt ra. repeat: once (đúng ngày start_date),
+   daily, weekly (days = thứ, 0 = CN … 6 = T7), monthly (days = ngày trong
+   tháng, 31 = ngày cuối tháng), every (mỗi every_n ngày tính từ start_date).
+   who: 'all' cả tiệm · 'counter' quầy · 'owner' chủ · 'b:<id>' một thợ.
+   steps: các bước, mỗi dòng một bước — phải tick hết mới bấm xong được. */
+CREATE TABLE IF NOT EXISTS tasks (
+  id          INTEGER PRIMARY KEY,
+  title       TEXT    NOT NULL,
+  steps       TEXT    NOT NULL DEFAULT '',
+  who         TEXT    NOT NULL DEFAULT 'all',
+  repeat      TEXT    NOT NULL DEFAULT 'once',
+  days        TEXT    NOT NULL DEFAULT '',
+  every_n     INTEGER NOT NULL DEFAULT 0,
+  start_date  TEXT    NOT NULL,
+  end_date    TEXT    NOT NULL DEFAULT '',
+  part        TEXT    NOT NULL DEFAULT '',     -- sang / chieu / toi / '' = trong ngày
+  need_photo  INTEGER NOT NULL DEFAULT 0,
+  active      INTEGER NOT NULL DEFAULT 1,
+  created_by  INTEGER,
+  created_at  INTEGER NOT NULL
+);
+
+/* Một lần làm xong — due_date là ngày của lượt việc đó (làm trễ vẫn ghi
+   đúng lượt), done_at là lúc bấm. Ảnh nằm ở <thư mục dữ liệu>/uploads,
+   tự xoá sau 30 ngày (photo = '' sau khi xoá). */
+CREATE TABLE IF NOT EXISTS task_done (
+  id          INTEGER PRIMARY KEY,
+  task_id     INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  due_date    TEXT    NOT NULL,
+  user_id     INTEGER,
+  done_at     INTEGER NOT NULL,
+  note        TEXT    NOT NULL DEFAULT '',
+  photo       TEXT    NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_done ON task_done(task_id, due_date);
+
+/* ---------------- bảng tin ---------------- */
+
+/* Thông báo của chủ cho nhân viên. Hiện từ start_date đến hết end_date
+   (trống = không giới hạn). Mỗi tài khoản bấm "Đã đọc" một lần. */
+CREATE TABLE IF NOT EXISTS notices (
+  id          INTEGER PRIMARY KEY,
+  title       TEXT    NOT NULL,
+  body        TEXT    NOT NULL DEFAULT '',
+  pinned      INTEGER NOT NULL DEFAULT 0,
+  start_date  TEXT    NOT NULL DEFAULT '',
+  end_date    TEXT    NOT NULL DEFAULT '',
+  created_by  INTEGER,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS notice_reads (
+  notice_id   INTEGER NOT NULL REFERENCES notices(id) ON DELETE CASCADE,
+  user_id     INTEGER NOT NULL,
+  read_at     INTEGER NOT NULL,
+  PRIMARY KEY (notice_id, user_id)
+);

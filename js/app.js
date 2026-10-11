@@ -31,6 +31,10 @@ const App = {
   pay: {open: 0},
   mine: {month: ''},
   sched: {date: '', sel: 0, form: null, off: null, mode: 'day'},
+  /* Bảng tin: thông báo đang sửa, việc đang mở / bước đã tick / ảnh vừa chụp. */
+  boardUi: {ntEdit: null, tkNew: false, tkOpen: '', tkSteps: {}, tkPhoto: {}, tkNote: {}},
+  taskUi: {tkEdit: null},
+  badge: {notices: 0, tasks: 0},
 
   iso(x){ return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0'); },
   addDays(d, n){ const x = new Date(d + 'T00:00:00'); x.setDate(x.getDate() + n); return this.iso(x); },
@@ -78,9 +82,11 @@ const App = {
     });
     this._wasWide = this.wide();
     if (API.token){
-      try{ this.applyMe(await API.call('me')); }
+      try{ this.applyMe(await API.call('me')); await this.badgeRefresh(true); }
       catch(e){ /* hết phiên thì API.call đã dọn token; lỗi mạng thì vẫn thử vẽ */ }
     }
+    /* Máy quầy mở cả ngày: vài phút hỏi một lần có thông báo / việc mới không. */
+    setInterval(() => { if (!document.hidden) this.badgeRefresh(true); }, 3 * 60 * 1000);
     this.go(this.homeTab());
   },
 
@@ -94,11 +100,50 @@ const App = {
   /* ---------------- điều hướng ---------------- */
 
   tabs(){
-    if (API.isBarber()) return [['bsched', '📅', 'Lịch hẹn'], ['mine', '🧾', 'Hoá đơn'], ['more', '☰', 'Khác']];
+    if (API.isBarber()) return [['bsched', '📅', 'Lịch hẹn'], ['mine', '🧾', 'Hoá đơn'], ['board', '📢', 'Bảng tin'], ['more', '☰', 'Khác']];
     return API.isOwner()
       ? [['pos', '💳', 'Bán hàng'], ['sched', '📅', 'Lịch hẹn'], ['customers', '👥', 'Khách'], ['day', '📋', 'Sổ ngày'], ['bills', '🧾', 'Hoá đơn'],
-         ['dash', '📊', 'Tổng quan'], ['payroll', '💰', 'Lương'], ['more', '⚙︎', 'Thiết lập']]
-      : [['pos', '💳', 'Bán hàng'], ['sched', '📅', 'Lịch hẹn'], ['lookup', '🔎', 'Tra khách'], ['day', '📋', 'Báo cáo'], ['more', '☰', 'Khác']];
+         ['board', '📢', 'Bảng tin'], ['dash', '📊', 'Tổng quan'], ['payroll', '💰', 'Lương'], ['more', '⚙︎', 'Thiết lập']]
+      : [['pos', '💳', 'Bán hàng'], ['sched', '📅', 'Lịch hẹn'], ['board', '📢', 'Bảng tin'], ['lookup', '🔎', 'Tra khách'], ['day', '📋', 'Báo cáo'], ['more', '☰', 'Khác']];
+  },
+
+  /* Tên quán và gợi ý phím tắt chỉ hiện khi thanh tab thành thanh bên
+     trái trên máy tính (CSS ẩn đi trên điện thoại). Tab Bảng tin có chấm:
+     đỏ = thông báo chưa đọc, vàng = việc của mình hôm nay còn lại. */
+  drawTabs(){
+    const tabs = $('#tabs');
+    if (!tabs || tabs.hidden) return;
+    const root = this.stack[0].name, b = this.badge;
+    const cham = id => id !== 'board' ? '' : b.notices ? `<i class="tdot">${b.notices}</i>` : b.tasks ? `<i class="tdot warn">${b.tasks}</i>` : '';
+    const ds = this.tabs();
+    tabs.classList.toggle('many', ds.length > 8);
+    tabs.innerHTML = `<div class="brand"><b>✂︎ Hội viên</b><small>${esc(this.shop)}</small></div>`
+      + ds.map(([id, ic, ten]) =>
+      `<button data-act="tab" data-id="${id}" class="${root === id ? 'on' : ''}"><span>${ic}${cham(id)}</span>${ten}</button>`).join('')
+      + `<div class="hint"><kbd>/</kbd> tìm khách<br><kbd>Esc</kbd> đóng thẻ</div>`;
+  },
+
+  async badgeRefresh(force){
+    if (!API.token) return;
+    if (!force && Date.now() - (this._bAt || 0) < 60000) return;
+    this._bAt = Date.now();
+    let r;
+    try{ r = await API.call('board_count'); }catch(e){ return; }
+    const cu = this.badge.notices;
+    this.badge = {notices: r.notices, tasks: r.tasks};
+    this.drawTabs();
+    if (cu !== r.notices) this.noticeBarSync();
+  },
+
+  /* Cập nhật dải "có thông báo mới" trên màn đang mở mà không vẽ lại cả màn. */
+  noticeBarSync(){
+    const cu = document.querySelector('.newnotice');
+    const html = Views.noticeBar();
+    if (cu){ if (html) cu.outerHTML = html; else cu.remove(); return; }
+    if (html && ['pos', 'bsched', 'lookup'].includes(this.cur.name)){
+      const h = document.querySelector('#view .head');
+      if (h) h.insertAdjacentHTML('afterend', html);
+    }
   },
 
   go(tab){ this.stack = [{name: tab}]; window.scrollTo(0, 0); return this.render(); },
@@ -125,14 +170,9 @@ const App = {
     }
     if (!this.today) try{ this.applyMe(await API.call('me')); }catch(e){ if (!API.token) return this._render(); }
 
-    const root = this.stack[0].name;
     tabs.hidden = false;
-    /* Tên quán và gợi ý phím tắt chỉ hiện khi thanh tab thành thanh bên
-       trái trên máy tính (CSS ẩn đi trên điện thoại). */
-    tabs.innerHTML = `<div class="brand"><b>✂︎ Hội viên</b><small>${esc(this.shop)}</small></div>`
-      + this.tabs().map(([id, ic, ten]) =>
-      `<button data-act="tab" data-id="${id}" class="${root === id ? 'on' : ''}"><span>${ic}</span>${ten}</button>`).join('')
-      + `<div class="hint"><kbd>/</kbd> tìm khách<br><kbd>Esc</kbd> đóng thẻ</div>`;
+    this.drawTabs();
+    this.badgeRefresh();
 
     const s = this.cur;
     switch (s.name){
@@ -203,7 +243,16 @@ const App = {
         break;
       }
       case 'promos':
-        view.innerHTML = Views.promos((await API.call('promos')).rows);
+        view.innerHTML = Views.promos(await API.call('promos'));
+        break;
+      case 'board':
+        this.data.board = await API.call('board');
+        this.drawBoard();
+        this.badgeRefresh(true);
+        break;
+      case 'tasks':
+        this.data.tasksAll = await API.call('tasks_all');
+        this.drawTasks();
         break;
       case 'card': {
         if (!this.barbers) this.barbers = (await API.call('barbers')).rows.filter(b => b.active);
@@ -281,6 +330,43 @@ const App = {
       case 'password':  view.innerHTML = Views.password(); break;
       default:          this.stack = [{name: 'lookup'}]; return this._render();
     }
+  },
+
+  drawBoard(){
+    const y = window.scrollY;
+    $('#view').innerHTML = Views.board(this.data.board, this.boardUi);
+    window.scrollTo(0, y);
+  },
+
+  drawTasks(){
+    const y = window.scrollY;
+    $('#view').innerHTML = Views.tasks(this.data.tasksAll, this.taskUi);
+    window.scrollTo(0, y);
+  },
+
+  /* Ảnh chụp từ điện thoại 3–5MB → JPEG cạnh dài 1280px (~150–250KB). */
+  async photoShrink(file){
+    const url = URL.createObjectURL(file);
+    try{
+      const img = await new Promise((ok, no) => {
+        const i = new Image();
+        i.onload = () => ok(i); i.onerror = () => no(new Error('Không đọc được ảnh này — chụp lại thử.'));
+        i.src = url;
+      });
+      const k = Math.min(1, 1280 / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      return c.toDataURL('image/jpeg', 0.72);
+    }finally{ URL.revokeObjectURL(url); }
+  },
+
+  async photoView(id){
+    const r = await API.call('task_photo', {id});
+    const o = document.createElement('div');
+    o.className = 'photoview'; o.dataset.act = 'photoClose';
+    o.innerHTML = `<img src="${r.data}" alt="ảnh việc đã làm"><span>Bấm để đóng</span>`;
+    document.body.appendChild(o);
   },
 
   drawSvc(){
@@ -365,8 +451,11 @@ const App = {
     const t = st.cus && !st.cus.walkin && st.cus.tier ? st.cus.tier : null;
     const tierPct = t ? t.disc_pct || 0 : 0;
     const tier = tierPct > 0 ? pct(tierPct, hangIdx) : {};
-    const promo = (this.posData.promos || []).find(p => p.id === st.promo) || null;
-    const pro = promo ? (promo.kind === 'pct' ? pct(promo.value, elig) : chia(promo.value, elig)) : {};
+    let promo = (this.posData.promos || []).find(p => p.id === st.promo) || null;
+    if (promo && this.promoBlock(promo)) promo = null;
+    /* Khuyến mãi chỉ cho vài dịch vụ thì chỉ giảm các dòng đó. */
+    const kmIdx = promo && promo.svc.length ? elig.filter(i => promo.svc.includes(lines[i].svc.id)) : elig;
+    const pro = promo ? (promo.kind === 'pct' ? pct(promo.value, kmIdx) : chia(promo.value, kmIdx)) : {};
     const laKm = tong(pro) > tong(tier);
     const dung = laKm ? pro : tier;
     let note = tong(dung) > 0 ? (laKm ? 'KM: ' + promo.name : 'Hạng ' + t.name + ' −' + tierPct + '%') : '';
@@ -378,6 +467,30 @@ const App = {
                 subtotal: gross.reduce((a, b) => a + b, 0), discount: disc.reduce((a, b) => a + b, 0)};
     ra.total = ra.subtotal - ra.discount;
     return ra;
+  },
+
+  /* Cùng điều kiện với mhPromoBlock (api/lib.php): '' = áp được, còn lại là
+     lý do cho quầy đọc. Máy chủ kiểm lại lúc thanh toán. */
+  promoBlock(p){
+    const st = this.pos, sv = this.posData.services || [];
+    const date = st.date || this.today;
+    if (p.wd.length && !p.wd.includes(new Date(date + 'T00:00:00').getDay()))
+      return 'Chỉ áp dụng ' + p.wd.map(i => THU[i]).join(', ');
+    if (date === this.today && (p.time_from || p.time_to)){
+      const d = new Date(), m = d.getHours() * 60 + d.getMinutes();
+      const ph = (t, mac) => t ? Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5)) : mac;
+      if (m < ph(p.time_from, 0) || m >= ph(p.time_to, 1440)) return 'Chỉ áp dụng ' + (p.time_from || '00:00') + '–' + (p.time_to || '24:00');
+    }
+    const gia = l => (sv.find(x => x.id === l.sid) || {}).price || Number(l.price) || 0;
+    const sub = st.lines.reduce((a, l) => a + gia(l) * l.qty, 0);
+    if (p.min_total > 0 && sub < p.min_total) return 'Hoá đơn từ ' + tien(p.min_total);
+    const cus = st.cus && !st.cus.walkin ? st.cus : null;
+    if ((p.new_only || p.once_per) && !cus) return 'Nhập SĐT khách để kiểm tra';
+    if (p.new_only && cus.visits > 0) return 'Chỉ cho khách lần đầu đến';
+    if (p.once_per && (cus.promo_used || []).includes(p.id)) return 'Khách đã dùng khuyến mãi này rồi';
+    const md = l => l.mdOpen ? Number(String(l.mdisc || '').replace(/\D/g, '')) || 0 : 0;
+    if (p.svc.length && !st.lines.some(l => !md(l) && p.svc.includes(l.sid))) return 'Hoá đơn chưa có dịch vụ được giảm';
+    return '';
   },
 
   /* Số đã gõ trong các ô tiền (có dấu chấm) → số nguyên. */
@@ -425,7 +538,7 @@ const App = {
     c.rewards.forEach(p => p.pending.forEach(e => gifts.push(e.gift)));
     if (c.bday && c.bday.pending) gifts.push('🎂 ' + c.bday.gift);
     this.pos.cus = {id: c.customer.id, name: c.customer.name, phone: c.customer.phone, tier: c.tier.tier,
-                    cuts: c.stats.cuts, last_barber_id: c.last_barber_id, gifts};
+                    cuts: c.stats.cuts, visits: c.stats.visits, promo_used: c.promo_used || [], last_barber_id: c.last_barber_id, gifts};
     /* Chọn sẵn thợ lượt trước — khách quen phần lớn ngồi lại ghế cũ. */
     if (!this.pos.barber && (this.posData.barbers || []).some(b => b.id === c.last_barber_id)) this.pos.barber = c.last_barber_id;
     this.drawPos();
@@ -462,7 +575,8 @@ const App = {
       items: st.lines.map((l, i) => ({service_id: l.sid, qty: l.qty, price: Number(l.price) || undefined, mdisc: q.lines[i].mdisc,
                                       detail: (l.detail || '').trim(), guest: l.guest || 0,
                                       barber_id: l.guest ? (st.gBarber || {})[l.guest] || 0 : 0})),
-      promo_id: st.promo || 0, mdisc_reason: st.mdReason,
+      promo_id: st.promo && !this.promoBlock((this.posData.promos || []).find(p => p.id === st.promo) || {wd: [], svc: []}) ? st.promo : 0,
+      mdisc_reason: st.mdReason,
       tip: st.tipN, pay_cash: cash, pay_transfer: tong - cash, note: st.note,
       expect_total: q.total, date: API.isOwner() ? st.date : undefined, client_ref: st.ref, booking_id: st.booking || 0});
     }catch(err){
@@ -1030,8 +1144,8 @@ const App = {
         }
         case 'promoDel': {
           if (!this.hoiLai(el, 'Xoá?')) return;
-          $('#view').innerHTML = Views.promos((await API.call('promo_del', {id})).rows);
-          return;
+          await API.call('promo_del', {id});
+          return this.render();
         }
         case 'merge': {
           if (!this.hoiLai(el, 'Chắc chưa? Bấm lần nữa')) return;
@@ -1226,6 +1340,67 @@ const App = {
         case 'importGo':
           el.disabled = true;               // bấm hai lần là gửi hai lượt ghi
           return await this.importRun(true);
+
+        /* ----- bảng tin ----- */
+        case 'photoClose': return el.remove();
+        case 'tkPhotoView': return await this.photoView(id);
+        case 'ntNew':    this.boardUi.ntEdit = 0; return this.drawBoard();
+        case 'ntEdit':   this.boardUi.ntEdit = id; return this.drawBoard();
+        case 'ntCancel': this.boardUi.ntEdit = null; return this.drawBoard();
+        case 'ntDel': {
+          if (!this.hoiLai(el, 'Xoá thật?')) return;
+          this.data.board.notices = (await API.call('notice_del', {id})).notices;
+          return this.drawBoard();
+        }
+        case 'ntRead': {
+          el.disabled = true;
+          const r = await API.call('notice_read', {id});
+          this.data.board.notices = r.notices;
+          this.badge.notices = r.unread;
+          this.drawTabs();
+          return this.drawBoard();
+        }
+        case 'tkNew':    this.boardUi.tkNew = !this.boardUi.tkNew; return this.drawBoard();
+        case 'tkNewAll': this.taskUi.tkEdit = 0; return this.drawTasks();
+        case 'tkEdit':   this.taskUi.tkEdit = id; return this.drawTasks();
+        case 'tkCancel':
+          if (this.cur.name === 'tasks'){ this.taskUi.tkEdit = null; return this.drawTasks(); }
+          this.boardUi.tkNew = false; return this.drawBoard();
+        case 'tkOpen': {
+          const k = el.dataset.k;
+          this.boardUi.tkOpen = this.boardUi.tkOpen === k ? '' : k;
+          return this.drawBoard();
+        }
+        case 'tkDone': {
+          const k = el.dataset.k, ui = this.boardUi;
+          el.disabled = true; el.textContent = 'Đang lưu…';
+          try{
+            this.data.board.tasks = (await API.call('task_done', {id, due: el.dataset.due,
+              note: (ui.tkNote[k] || '').trim(), photo: ui.tkPhoto[k] || ''})).tasks;
+          }catch(err){
+            if (err.data && err.data.tasks){ this.data.board.tasks = err.data.tasks; this.drawBoard(); }
+            throw err;
+          }
+          delete ui.tkSteps[k]; delete ui.tkPhoto[k]; delete ui.tkNote[k]; ui.tkOpen = '';
+          toast('Đã ghi: xong việc ✓', 'ok');
+          this.drawBoard();
+          return this.badgeRefresh(true);
+        }
+        case 'tkUndo': {
+          if (!this.hoiLai(el, 'Bỏ đánh dấu?')) return;
+          this.data.board.tasks = (await API.call('task_undo', {id})).tasks;
+          this.drawBoard();
+          return this.badgeRefresh(true);
+        }
+        case 'tkDel': {
+          if (!this.hoiLai(el, 'Xoá cả lịch sử?')) return;
+          const r = await API.call('task_del', {id});
+          toast('Đã xoá việc', 'ok');
+          this.badgeRefresh(true);
+          if (this.cur.name === 'tasks') return this.render();
+          this.data.board.tasks = r.tasks; this.boardUi.tkOpen = '';
+          return this.drawBoard();
+        }
       }
     }catch(err){
       toast(err.message, 'bad');
@@ -1314,6 +1489,7 @@ const App = {
 
   onInput(e){
     const t = e.target;
+    if (t.id === 'tkNote'){ this.boardUi.tkNote[t.dataset.k] = t.value; return; }
     if (t.id === 'q'){
       this.look.q = t.value;
       const so = t.value.replace(/\D/g, '');
@@ -1446,6 +1622,18 @@ const App = {
       return this.billsReload(k === 'from' || k === 'to');
     }
     if (t.id === 'posPromo'){ this.pos.promo = Number(t.value); return this.drawPos(); }
+    if (t.id === 'tkRepeat'){ t.form.dataset.rep = t.value; return; }
+    if (t.dataset.tkstep !== undefined){
+      const k = t.dataset.k, ui = this.boardUi;
+      (ui.tkSteps[k] = ui.tkSteps[k] || {})[Number(t.dataset.tkstep)] = t.checked;
+      return this.drawBoard();
+    }
+    if (t.id === 'tkPhoto' && t.files.length){
+      const k = t.dataset.k;
+      return this.photoShrink(t.files[0])
+        .then(url => { this.boardUi.tkPhoto[k] = url; this.drawBoard(); })
+        .catch(e => toast(e.message, 'bad'));
+    }
     if (t.id === 'posDate'){ this.pos.date = t.value; return; }
     if (t.dataset.gb){ (this.pos.gBarber = this.pos.gBarber || {})[Number(t.dataset.gb)] = Number(t.value) || 0; return; }
 
@@ -1588,11 +1776,34 @@ const App = {
         return this.render();
       }
       if (f.dataset.promo !== undefined){
-        const r = await API.call('promo_save', Object.assign({}, v, {id: Number(f.dataset.promo),
-                                  value: Number(String(v.value).replace(/\D/g, '')), active: Number(v.active)}));
+        const fd = new FormData(f);
+        await API.call('promo_save', Object.assign({}, v, {id: Number(f.dataset.promo),
+                                  value: Number(String(v.value).replace(/\D/g, '')), active: Number(v.active),
+                                  min_total: Number(String(v.min_total || '').replace(/\D/g, '')) || 0,
+                                  svc: fd.getAll('svc').map(Number), wd: fd.getAll('wd').map(Number),
+                                  new_only: v.new_only ? 1 : 0, once_per: v.once_per ? 1 : 0}));
         toast('Đã lưu khuyến mãi', 'ok');
-        $('#view').innerHTML = Views.promos(r.rows);
-        return;
+        return this.render();
+      }
+      if (f.id === 'noticeForm'){
+        const r = await API.call('notice_save', Object.assign({}, v, {id: Number(f.dataset.id),
+                                  pinned: v.pinned ? 1 : 0, reread: v.reread ? 1 : 0}));
+        this.data.board.notices = r.notices; this.boardUi.ntEdit = null;
+        toast('Đã đăng thông báo', 'ok');
+        return this.drawBoard();
+      }
+      if (f.id === 'taskForm'){
+        const fd = new FormData(f), rep = v.repeat || 'once';
+        const days = rep === 'weekly' ? fd.getAll('wd').map(Number)
+                   : rep === 'monthly' ? String(v.mdays || '').split(/[^\d]+/).filter(Boolean).map(Number) : [];
+        await API.call('task_save', {id: Number(f.dataset.id), title: v.title, steps: v.steps, who: v.who, part: v.part,
+                                     repeat: rep, days, every_n: Number(v.every_n) || 0, start_date: v.start_date, end_date: v.end_date || '',
+                                     need_photo: v.need_photo ? 1 : 0, active: Number(f.dataset.id) ? (v.active ? 1 : 0) : 1});
+        toast('Đã lưu việc', 'ok');
+        this.badgeRefresh(true);
+        if (this.cur.name === 'tasks'){ this.taskUi.tkEdit = null; return this.render(); }
+        this.boardUi.tkNew = false;
+        return this.render();
       }
       if (f.id === 'cusEditForm'){
         this.data.card = await API.call('customer_update', Object.assign({id: this.data.card.customer.id}, v));

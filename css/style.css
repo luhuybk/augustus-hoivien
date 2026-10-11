@@ -577,3 +577,60 @@ details.card>summary::-webkit-details-marker{display:none}
 .pghead .inp.mini{width:auto;max-width:150px;padding:5px 8px;text-align:left}
 .pghead .x{width:30px;height:30px}
 .pgroup .pline:last-child{border-bottom:0}
+
+/* ---------------- bảng tin ---------------- */
+.tabs button span{position:relative}
+.tdot{position:absolute;top:-6px;right:-12px;min-width:17px;height:17px;padding:0 4px;border-radius:99px;
+      background:var(--bad);color:#fff;font:700 10.5px/17px system-ui,sans-serif;font-style:normal;text-align:center}
+.tdot.warn{background:var(--warn);color:#1b1204}
+.note.newnotice{background:rgba(214,165,74,.14);color:var(--acc);font-weight:600}
+.boardgrid{display:grid;gap:0 14px;grid-template-columns:minmax(0,1fr)}
+.boardgrid>div{min-width:0}
+@media(min-width:1000px){.boardgrid{grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);align-items:start}}
+.notice{padding:12px 0;border-top:1px solid var(--line)}
+.notice:first-of-type{border-top:0}
+.notice.unread{border-left:3px solid var(--acc);padding-left:10px;background:rgba(214,165,74,.06);border-radius:0 10px 10px 0}
+.nbody{white-space:pre-wrap;margin-top:4px;line-height:1.55}
+.task{border:1px solid var(--line);border-radius:12px;margin-bottom:8px;background:var(--bg2)}
+.task.mine{border-color:rgba(214,165,74,.45)}
+.task.late{border-color:var(--bad)}
+.task.done{padding:10px 12px;opacity:.75}
+.task .trow{width:100%;padding:11px 12px;gap:10px;color:inherit;font:inherit}
+.task .tbody{padding:0 12px 12px 44px}
+.tbox{flex:none;width:22px;height:22px;border-radius:7px;border:2px solid var(--tx3);display:inline-grid;place-items:center;font-size:13px;font-weight:800}
+.tbox.on{background:var(--ok);border-color:var(--ok);color:#04140c}
+.tsteps{display:grid;gap:6px;margin-bottom:10px}
+.tsteps .check{font-size:14px}
+.tsteps input{width:18px;height:18px;flex:none}
+.tthumb{height:52px;border-radius:8px;border:1px solid var(--line)}
+.taskform .r-once,.taskform .r-rep,.taskform .r-weekly,.taskform .r-monthly,.taskform .r-every{display:none}
+.taskform[data-rep=once] .r-once,.taskform:not([data-rep=once]) .r-rep,.taskform[data-rep=weekly] .r-weekly,
+.taskform[data-rep=monthly] .r-monthly,.taskform[data-rep=every] .r-every{display:block}
+.wdpick{display:flex;flex-wrap:wrap;gap:6px}
+.wdpick label{margin:0;cursor:pointer}
+.wdpick input{position:absolute;opacity:0;width:1px;height:1px}
+.wdpick span{display:inline-block;padding:7px 12px;border-radius:99px;background:var(--bg3);border:1px solid var(--line);
+             font-size:13px;font-weight:600;color:var(--tx2)}
+.wdpick input:checked+span{background:var(--acc);border-color:var(--acc);color:var(--acc-tx)}
+.wdpick input:focus-visible+span{outline:2px solid var(--acc);outline-offset:2px}
+.promo{border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-bottom:8px}
+.promo.on{border-color:rgba(79,211,154,.5)}
+.promo.off{opacity:.55}
+.promo .pval{font-weight:800;color:var(--ok);font-size:16px}
+.promo .perks,.perks.small{font-size:13px;margin:6px 0 0}
+.pitch{margin-top:8px;padding:8px 10px;border-radius:10px;background:var(--bg3);font-size:13.5px;font-style:italic;color:var(--tx2)}
+.pwarn{margin-top:6px;color:var(--warn);font-size:13px;font-weight:600}
+.pcond{margin-top:10px;border-top:1px dashed var(--line);padding-top:8px}
+.pcond summary{cursor:pointer;font-weight:600;font-size:13.5px}
+.bitem{padding:8px 0;border-top:1px solid var(--line)}
+.bitem:first-of-type{border-top:0}
+.hday{margin-bottom:10px}
+.hdate{font-size:12.5px;font-weight:700;color:var(--tx3);margin:0 0 4px}
+.hrow{display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--bg2);border:1px solid var(--line);border-radius:10px;margin-bottom:4px;font-size:13.5px;flex-wrap:wrap}
+.hrow .ok{color:var(--ok);font-weight:800}.hrow .bad{color:var(--bad);font-weight:800}
+.photoview{position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.88);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:16px;cursor:zoom-out}
+.photoview img{max-width:100%;max-height:85vh;border-radius:10px}
+.photoview span{color:#ccc;font-size:13px}
+/* Chủ có 9 tab — điện thoại hẹp thì chữ nhỏ lại cho khỏi đè nhau. */
+@media(max-width:480px){.tabs.many button{font-size:8.6px;letter-spacing:-.2px;overflow:hidden;text-overflow:ellipsis}
+  .tabs.many button span{font-size:17px}}
