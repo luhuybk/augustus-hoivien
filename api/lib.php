@@ -182,6 +182,17 @@ function mhMigrate(PDO $pdo): void {
   if (mhAddColumn($pdo, 'services', 'bookable', 'INTEGER NOT NULL DEFAULT 1'))
     $pdo->exec("UPDATE services SET bookable = 0 WHERE kind = 'product'");
 
+  /* Khuyến mãi có điều kiện app tự kiểm (dịch vụ, thứ, giờ, hoá đơn tối
+     thiểu, khách mới, mỗi khách một lần) + điều kiện ghi chữ cho nhân viên. */
+  foreach (['svc_ids' => "TEXT NOT NULL DEFAULT ''", 'weekdays' => "TEXT NOT NULL DEFAULT ''",
+            'time_from' => "TEXT NOT NULL DEFAULT ''", 'time_to' => "TEXT NOT NULL DEFAULT ''",
+            'min_total' => 'INTEGER NOT NULL DEFAULT 0', 'new_only' => 'INTEGER NOT NULL DEFAULT 0',
+            'once_per' => 'INTEGER NOT NULL DEFAULT 0', 'cond_note' => "TEXT NOT NULL DEFAULT ''",
+            'pitch' => "TEXT NOT NULL DEFAULT ''"] as $cot => $kieu)
+    mhAddColumn($pdo, 'promos', $cot, $kieu);
+  mhAddColumn($pdo, 'visits', 'promo_id', 'INTEGER');
+  $pdo->exec('CREATE INDEX IF NOT EXISTS idx_visit_promo ON visits(promo_id, customer_id) WHERE promo_id IS NOT NULL');
+
   if ((int)$pdo->query('SELECT COUNT(*) FROM users')->fetchColumn() > 0) {
     mhSyncOwnerFromConfig($pdo);
     return;
@@ -460,14 +471,16 @@ function mhCurrentUser(): ?array {
   return $row;
 }
 
-/* Tài khoản thợ chỉ được xem hoá đơn của chính mình và báo sai — mọi lệnh
-   khác (tính tiền, tra khách, chốt ca…) chặn ngay ở cửa. */
-const MH_BARBER_ACTIONS = ['me', 'logout', 'my_bills', 'report_add', 'book_mine'];
+/* Tài khoản thợ chỉ được xem hoá đơn của chính mình, báo sai, xem bảng tin
+   và tick việc — mọi lệnh khác (tính tiền, tra khách, chốt ca…) chặn ngay
+   ở cửa. */
+const MH_BARBER_ACTIONS = ['me', 'logout', 'my_bills', 'report_add', 'book_mine',
+                           'board', 'board_count', 'task_save', 'task_del', 'task_done', 'task_undo', 'task_photo', 'notice_read'];
 
 function mhRequireUser(): array {
   $u = mhCurrentUser();
   if ($u && $u['role'] === 'barber' && !in_array($GLOBALS['action'] ?? '', MH_BARBER_ACTIONS, true))
-    mhFail('Tài khoản thợ chỉ xem được hoá đơn của mình.', 403);
+    mhFail('Tài khoản thợ không dùng được mục này.', 403);
   if (!$u) {
     /* Mã riêng cho "hết phiên": 401 còn dùng cho "sai mật khẩu", mà gõ
        nhầm một lần rồi bị văng ra ngoài thì vô lý. */
@@ -1023,7 +1036,12 @@ function mhQuote(array $lines, int $tierPct, string $tierName, ?array $promo, ?a
   };
   $tier = $tierPct > 0 ? $pct($tierPct, $hangIdx) : [];
   $pro  = [];
-  if ($promo) $pro = $promo['kind'] === 'pct' ? $pct((int)$promo['value'], $eligIdx) : $chia((int)$promo['value'], $eligIdx);
+  if ($promo) {
+    /* Khuyến mãi chỉ cho vài dịch vụ (vd. chỉ uốn) thì chỉ giảm các dòng đó. */
+    $kmIdx = $promo['svc'] ? array_values(array_filter($eligIdx, function ($i) use ($lines, $promo) {
+      return in_array((int)$lines[$i]['svc']['id'], $promo['svc'], true); })) : $eligIdx;
+    $pro = $promo['kind'] === 'pct' ? $pct((int)$promo['value'], $kmIdx) : $chia((int)$promo['value'], $kmIdx);
+  }
   $laKm = array_sum($pro) > array_sum($tier);
   $dung = $laKm ? $pro : $tier;
   $note = '';
@@ -1037,7 +1055,8 @@ function mhQuote(array $lines, int $tierPct, string $tierName, ?array $promo, ?a
     $tay[$i] = min($gross[$i], max(0, (int)($l['mdisc'] ?? 0)));
     if ($tay[$i] > 0) $disc[$i] = $tay[$i];
   }
-  $ra = ['lines' => [], 'subtotal' => 0, 'discount' => 0, 'total' => 0, 'note' => $note, 'mdisc' => array_sum($tay)];
+  $ra = ['lines' => [], 'subtotal' => 0, 'discount' => 0, 'total' => 0, 'note' => $note, 'mdisc' => array_sum($tay),
+         'promo_used' => $laKm && array_sum($pro) > 0];
   foreach ($lines as $i => $l) {
     $ra['lines'][] = ['net' => $gross[$i] - $disc[$i], 'disc' => $disc[$i], 'gross' => $gross[$i], 'mdisc' => $tay[$i]];
     $ra['subtotal'] += $gross[$i];
@@ -1057,9 +1076,42 @@ function mhPromos(bool $todayOnly): array {
     $p['running'] = $p['active'] && ($p['start_date'] === '' || $p['start_date'] <= $nay)
                     && ($p['end_date'] === '' || $p['end_date'] >= $nay);
     if ($todayOnly && !$p['running']) continue;
+    $p['svc'] = mhIntList((string)$p['svc_ids']);
+    $p['wd'] = mhIntList((string)$p['weekdays']);
+    $p['min_total'] = (int)$p['min_total']; $p['new_only'] = (int)$p['new_only']; $p['once_per'] = (int)$p['once_per'];
+    unset($p['svc_ids'], $p['weekdays']);
     $ra[] = $p;
   }
   return $ra;
+}
+
+function mhIntList(string $s): array {
+  return array_values(array_unique(array_map('intval', array_filter(explode(',', $s), function ($x) { return trim($x) !== ''; }))));
+}
+
+/* Khuyến mãi có áp được cho hoá đơn này không: '' = được, còn lại là câu
+   giải thích cho quầy. Màn bán hàng (App.promoBlock) kiểm y như vậy để làm
+   mờ khuyến mãi không đủ điều kiện; máy chủ kiểm lại lúc thanh toán.
+   $ctx: date, min (phút trong ngày; null = không xét giờ — chủ ghi bù ngày
+   cũ), subtotal, cid (null = khách lẻ), visits (số hoá đơn trước đây của
+   khách), used (khách đã dùng khuyến mãi này chưa), svc (id dịch vụ trên
+   hoá đơn, trừ món giảm tay). */
+function mhPromoBlock(array $p, array $ctx): string {
+  if ($p['wd'] && !in_array((int)date('w', strtotime($ctx['date'])), $p['wd'], true))
+    return 'Chỉ áp dụng ' . implode(', ', array_map(function ($d) { return ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'][$d] ?? '?'; }, $p['wd']));
+  if ($ctx['min'] !== null && ($p['time_from'] !== '' || $p['time_to'] !== '')) {
+    $hm = function ($t, $mac) { return $t === '' ? $mac : (int)substr($t, 0, 2) * 60 + (int)substr($t, 3, 2); };
+    if ($ctx['min'] < $hm($p['time_from'], 0) || $ctx['min'] >= $hm($p['time_to'], 1440))
+      return 'Chỉ áp dụng ' . ($p['time_from'] ?: '00:00') . '–' . ($p['time_to'] ?: '24:00');
+  }
+  if ($p['min_total'] > 0 && $ctx['subtotal'] < $p['min_total'])
+    return 'Hoá đơn từ ' . number_format($p['min_total'], 0, ',', '.') . 'đ';
+  if (($p['new_only'] || $p['once_per']) && !$ctx['cid'])
+    return 'Nhập SĐT khách để kiểm tra';
+  if ($p['new_only'] && $ctx['visits'] > 0) return 'Chỉ cho khách lần đầu đến';
+  if ($p['once_per'] && $ctx['used']) return 'Khách đã dùng khuyến mãi này rồi';
+  if ($p['svc'] && !array_intersect($p['svc'], $ctx['svc'])) return 'Hoá đơn chưa có dịch vụ được giảm';
+  return '';
 }
 
 function mhServices(bool $activeOnly): array {
@@ -1463,4 +1515,241 @@ function mhSmtpSend(string $to, string $subject, string $text, ?string $file = n
   } finally {
     fclose($fp);
   }
+}
+
+/* ============================================================
+   Việc ở tiệm
+   ============================================================
+
+   Không sinh sẵn "lượt việc" vào CSDL: lượt nào rơi vào ngày nào tính ra
+   từ cách lặp (mhTaskOn). Chỉ lần làm xong mới ghi (task_done). Nhờ vậy
+   sửa lịch lặp là các ngày sau đổi theo, không phải dọn gì.
+
+   Việc trễ: việc một lần chưa làm thì ngày nào cũng hiện cho đến khi xong.
+   Việc lặp (tuần / tháng / mỗi N ngày) bị bỏ thì hiện "trễ" cho đến khi
+   làm bù hoặc tới lượt kế — tới lượt kế thì lượt cũ thành "bỏ lỡ". Việc
+   hằng ngày không mang sang hôm sau. */
+
+const MH_PHOTO_DAYS = 30;
+const MH_TASK_LOOKBACK = 62;      // tìm lượt trễ lùi tối đa bao nhiêu ngày
+
+function mhTaskRow(array $t): array {
+  foreach (['id', 'every_n', 'need_photo', 'active', 'created_at'] as $k) $t[$k] = (int)$t[$k];
+  $t['created_by'] = $t['created_by'] !== null ? (int)$t['created_by'] : null;
+  $t['days'] = mhIntList((string)$t['days']);
+  return $t;
+}
+
+function mhTasks(bool $activeOnly): array {
+  return array_map('mhTaskRow', db()->query('SELECT * FROM tasks' . ($activeOnly ? ' WHERE active = 1' : '')
+                                           . ' ORDER BY active DESC, id')->fetchAll());
+}
+
+/* Việc này có lượt vào ngày $d không. */
+function mhTaskOn(array $t, string $d): bool {
+  if ($d < $t['start_date']) return false;
+  if ($t['repeat'] === 'once') return $d === $t['start_date'];
+  if ($t['end_date'] !== '' && $d > $t['end_date']) return false;
+  $ts = strtotime($d . ' 12:00');
+  switch ($t['repeat']) {
+    case 'daily':  return true;
+    case 'weekly': return in_array((int)date('w', $ts), $t['days'], true);
+    case 'monthly': {
+      /* Ngày 31 (hay 30, 29) ở tháng ngắn hơn thì rơi vào ngày cuối tháng. */
+      $n = (int)date('j', $ts); $cuoi = (int)date('t', $ts);
+      foreach ($t['days'] as $x) if ($x === $n || ($x > $cuoi && $n === $cuoi)) return true;
+      return false;
+    }
+    case 'every': {
+      if ($t['every_n'] < 1) return false;
+      $k = (int)round(($ts - strtotime($t['start_date'] . ' 12:00')) / 86400);
+      return $k % $t['every_n'] === 0;
+    }
+  }
+  return false;
+}
+
+/* Lượt gần nhất TRƯỚC ngày $d (không tính $d). */
+function mhTaskPrev(array $t, string $d): ?string {
+  $ts = strtotime($d . ' 12:00');
+  for ($i = 1; $i <= MH_TASK_LOOKBACK; $i++) {
+    $x = date('Y-m-d', $ts - $i * 86400);
+    if ($x < $t['start_date']) return null;
+    if (mhTaskOn($t, $x)) return $x;
+  }
+  return null;
+}
+
+/* Việc giao cho ai — hiện trên thẻ việc. */
+function mhTaskWho(string $who, array $tenTho): string {
+  if ($who === 'counter') return 'Quầy';
+  if ($who === 'owner') return 'Chủ tiệm';
+  if (strncmp($who, 'b:', 2) === 0) return $tenTho[(int)substr($who, 2)] ?? 'Thợ';
+  return 'Cả tiệm';
+}
+
+/* Việc này có phải của người đang đăng nhập không — để xếp lên đầu và đếm
+   số "việc của tôi còn lại". Ai cũng THẤY và tick được mọi việc của tiệm. */
+function mhTaskMine(string $who, array $u): bool {
+  if ($who === 'all') return true;
+  if ($u['role'] === 'owner') return $who === 'owner';
+  if ($u['role'] === 'counter') return $who === 'counter';
+  return $u['barber_id'] !== null && $who === 'b:' . $u['barber_id'];
+}
+
+function mhTaskDoneMap(string $from, string $to): array {
+  $st = db()->prepare('SELECT d.*, u.name AS by_name FROM task_done d LEFT JOIN users u ON u.id = d.user_id
+                        WHERE d.due_date BETWEEN ? AND ?');
+  $st->execute([$from, $to]);
+  $ra = [];
+  foreach ($st->fetchAll() as $r)
+    $ra[(int)$r['task_id'] . '|' . $r['due_date']] = ['id' => (int)$r['id'], 'by' => $r['by_name'], 'user_id' => $r['user_id'] !== null ? (int)$r['user_id'] : null,
+      'at' => (int)$r['done_at'], 'time' => date('d/m H:i', (int)$r['done_at']), 'note' => $r['note'], 'photo' => $r['photo'] !== ''];
+  return $ra;
+}
+
+/* Danh sách việc hôm nay cho một tài khoản: lượt hôm nay + lượt còn trễ. */
+function mhTasksToday(array $u): array {
+  $nay = mhToday();
+  $tasks = mhTasks(true);
+  $tenTho = array_column(mhBarbers(), 'name', 'id');
+  $xong = mhTaskDoneMap(date('Y-m-d', strtotime($nay) - MH_TASK_LOOKBACK * 86400), $nay);
+  $ra = [];
+  foreach ($tasks as $t) {
+    $due = null;
+    if (mhTaskOn($t, $nay)) $due = $nay;
+    elseif ($t['repeat'] === 'once') {
+      if ($t['start_date'] < $nay && !isset($xong[$t['id'] . '|' . $t['start_date']])) $due = $t['start_date'];
+    } elseif ($t['repeat'] !== 'daily') {
+      $p = mhTaskPrev($t, $nay);
+      /* Lượt trước ngày tạo việc thì không tính là trễ. */
+      if ($p !== null && $p >= date('Y-m-d', $t['created_at']) && !isset($xong[$t['id'] . '|' . $p])) $due = $p;
+    }
+    if ($due === null) continue;
+    $d = $xong[$t['id'] . '|' . $due] ?? null;
+    $ra[] = ['id' => $t['id'], 'title' => $t['title'], 'steps' => $t['steps'], 'who' => $t['who'],
+             'who_name' => mhTaskWho($t['who'], $tenTho), 'mine' => mhTaskMine($t['who'], $u),
+             'repeat' => $t['repeat'], 'part' => $t['part'], 'need_photo' => $t['need_photo'],
+             'due' => $due, 'late' => (int)round((strtotime($nay) - strtotime($due)) / 86400),
+             'done' => $d, 'can_undo' => $d && ($u['role'] === 'owner' || ($d['user_id'] === $u['id'] && date('Y-m-d', $d['at']) === $nay)),
+             'can_del' => $u['role'] === 'owner' || ($t['created_by'] === $u['id'] && $t['repeat'] === 'once' && !$d),
+             'created_by' => $t['created_by']];
+  }
+  $buoi = ['sang' => 0, 'chieu' => 1, 'toi' => 2, '' => 3];
+  usort($ra, function ($a, $b) use ($buoi) {
+    return [(bool)$a['done'], !$a['mine'], -$a['late'], $buoi[$a['part']] ?? 3, $a['id']]
+       <=> [(bool)$b['done'], !$b['mine'], -$b['late'], $buoi[$b['part']] ?? 3, $b['id']];
+  });
+  return $ra;
+}
+
+/* Lượt việc trong khoảng ngày, kèm đã làm chưa — cho chủ xem lịch sử và
+   tổng kết tuần. Không tính lượt trước ngày tạo việc. */
+function mhTaskHistory(string $from, string $to, ?int $taskId = null): array {
+  $tenTho = array_column(mhBarbers(), 'name', 'id');
+  $xong = mhTaskDoneMap($from, $to);
+  $nay = mhToday();
+  $ra = [];
+  foreach (mhTasks(false) as $t) {
+    if ($taskId !== null && $t['id'] !== $taskId) continue;
+    if (!$t['active'] && $taskId === null) continue;
+    $tao = date('Y-m-d', $t['created_at']);
+    for ($ts = strtotime($from . ' 12:00'); ($d = date('Y-m-d', $ts)) <= $to; $ts += 86400) {
+      if ($d < $tao && $t['repeat'] !== 'once') continue;
+      if (!mhTaskOn($t, $d)) continue;
+      $ra[] = ['task_id' => $t['id'], 'title' => $t['title'], 'who_name' => mhTaskWho($t['who'], $tenTho),
+               'due' => $d, 'done' => $xong[$t['id'] . '|' . $d] ?? null, 'future' => $d > $nay, 'today' => $d === $nay];
+    }
+  }
+  usort($ra, function ($a, $b) { return [$b['due'], $a['task_id']] <=> [$a['due'], $b['task_id']]; });
+  return $ra;
+}
+
+function mhUploadDir(string $sub): string {
+  global $DB_FILE;
+  $goc = dirname($DB_FILE) . '/uploads';
+  if (!is_dir($goc)) @mkdir($goc, 0700, true);
+  if (!is_file($goc . '/.htaccess')) @file_put_contents($goc . '/.htaccess', "Require all denied\nOrder allow,deny\nDeny from all\n");
+  $d = $goc . '/' . $sub;
+  if (!is_dir($d)) @mkdir($d, 0700, true);
+  return $d;
+}
+
+/* Ảnh việc đã làm: máy gửi lên JPEG đã thu nhỏ (base64). Giữ 30 ngày. */
+function mhSavePhoto(string $dataUrl): string {
+  if (!preg_match('#^data:image/jpeg;base64,([A-Za-z0-9+/=]+)$#', $dataUrl, $m)) mhFail('Ảnh không đọc được — chụp lại thử.', 400);
+  $bin = base64_decode($m[1], true);
+  if ($bin === false || strlen($bin) < 1000 || strlen($bin) > 3 * 1024 * 1024 || substr($bin, 0, 2) !== "\xFF\xD8")
+    mhFail('Ảnh không hợp lệ hoặc lớn quá.', 400);
+  $thang = date('Ym');
+  $ten = $thang . '/' . date('d-His') . '-' . bin2hex(random_bytes(6)) . '.jpg';
+  mhUploadDir($thang);
+  if (@file_put_contents(mhUploadDir('') . '/' . $ten, $bin) === false) mhFail('Không lưu được ảnh trên máy chủ.', 500);
+  return $ten;
+}
+
+function mhPhotoPath(string $ten): ?string {
+  if (!preg_match('#^\d{6}/[0-9A-Za-z-]+\.jpg$#', $ten)) return null;
+  $f = mhUploadDir('') . '/' . $ten;
+  return is_file($f) ? $f : null;
+}
+
+/* Xoá ảnh quá 30 ngày — chạy mỗi ngày một lần (lần đầu ai đó mở bảng tin). */
+function mhPhotoCleanup(): void {
+  if (mhSetting('photo_clean', '') === mhToday()) return;
+  db()->prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('photo_clean', ?)")->execute([mhToday()]);
+  $st = db()->prepare("SELECT id, photo FROM task_done WHERE photo <> '' AND done_at < ?");
+  $st->execute([time() - MH_PHOTO_DAYS * 86400]);
+  foreach ($st->fetchAll() as $r) {
+    if ($f = mhPhotoPath($r['photo'])) @unlink($f);
+    db()->prepare("UPDATE task_done SET photo = '' WHERE id = ?")->execute([(int)$r['id']]);
+  }
+  foreach (glob(mhUploadDir('') . '/*', GLOB_ONLYDIR) ?: [] as $d) @rmdir($d);   // thư mục tháng rỗng
+}
+
+/* ============================================================
+   Bảng tin: thông báo của chủ
+   ============================================================ */
+
+/* Thông báo đang hiện với nhân viên hôm nay. Chủ thấy thêm thông báo sắp
+   hiện và đã hết hạn trong 30 ngày, kèm ai đã đọc / chưa đọc. */
+function mhNotices(array $u): array {
+  $nay = mhToday();
+  $owner = $u['role'] === 'owner';
+  $rows = db()->query('SELECT n.*, u.name AS by_name FROM notices n LEFT JOIN users u ON u.id = n.created_by
+                        ORDER BY n.pinned DESC, n.updated_at DESC')->fetchAll();
+  $docRoi = [];
+  foreach (db()->query('SELECT r.notice_id, r.user_id, r.read_at, u.name FROM notice_reads r JOIN users u ON u.id = r.user_id')->fetchAll() as $r)
+    $docRoi[(int)$r['notice_id']][(int)$r['user_id']] = ['name' => $r['name'], 'at' => date('d/m H:i', (int)$r['read_at'])];
+  $nv = $owner ? db()->query("SELECT id, name FROM users WHERE active = 1 AND role <> 'owner' ORDER BY name")->fetchAll() : [];
+  $ra = [];
+  foreach ($rows as $n) {
+    $id = (int)$n['id'];
+    $dangHien = ($n['start_date'] === '' || $n['start_date'] <= $nay) && ($n['end_date'] === '' || $n['end_date'] >= $nay);
+    $trangThai = $dangHien ? 'on' : ($n['start_date'] > $nay ? 'soon' : 'off');
+    if (!$owner && !$dangHien) continue;
+    if ($owner && $trangThai === 'off' && $n['end_date'] < date('Y-m-d', strtotime($nay) - 30 * 86400)) continue;
+    $doc = $docRoi[$id] ?? [];
+    $x = ['id' => $id, 'title' => $n['title'], 'body' => $n['body'], 'pinned' => (int)$n['pinned'],
+          'start_date' => $n['start_date'], 'end_date' => $n['end_date'], 'state' => $trangThai,
+          'by' => $n['by_name'], 'at' => date('d/m/Y H:i', (int)$n['updated_at']),
+          'read' => isset($doc[$u['id']]) || $owner];
+    if ($owner) {
+      $x['readers'] = array_values($doc);
+      $x['unread'] = array_values(array_map(function ($r) { return $r['name']; },
+                                  array_filter($nv, function ($r) use ($doc) { return !isset($doc[(int)$r['id']]); })));
+    }
+    $ra[] = $x;
+  }
+  return $ra;
+}
+
+function mhNoticeUnread(array $u): int {
+  if ($u['role'] === 'owner') return 0;
+  $nay = mhToday();
+  $st = db()->prepare("SELECT COUNT(*) FROM notices n
+                        WHERE (n.start_date = '' OR n.start_date <= ?) AND (n.end_date = '' OR n.end_date >= ?)
+                          AND NOT EXISTS (SELECT 1 FROM notice_reads r WHERE r.notice_id = n.id AND r.user_id = ?)");
+  $st->execute([$nay, $nay, $u['id']]);
+  return (int)$st->fetchColumn();
 }
