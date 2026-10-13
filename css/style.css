@@ -634,3 +634,62 @@ details.card>summary::-webkit-details-marker{display:none}
 /* Chủ có 9 tab — điện thoại hẹp thì chữ nhỏ lại cho khỏi đè nhau. */
 @media(max-width:480px){.tabs.many button{font-size:8.6px;letter-spacing:-.2px;overflow:hidden;text-overflow:ellipsis}
   .tabs.many button span{font-size:17px}}
+
+/* Công tắc bật / tắt */
+.sw{display:inline-flex;align-items:center;gap:6px;flex:none;padding:0;font-size:12.5px;font-weight:700;color:var(--tx3)}
+.sw i{position:relative;width:42px;height:24px;border-radius:99px;background:var(--bg4);border:1px solid var(--line);transition:background .15s}
+.sw i::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:var(--tx3);transition:left .15s,background .15s}
+.sw.on{color:var(--ok)}
+.sw.on i{background:var(--ok);border-color:var(--ok)}
+.sw.on i::after{left:20px;background:#fff}
+.sw:disabled{opacity:.5}
+.promo.paused{opacity:.65;border-style:dashed}
+.progrow{gap:12px;align-items:center}
+.progrow.off .grow b{opacity:.6}
+.tdcard.off{border-color:var(--warn);background:rgba(255,184,77,.06)}
+
+/* ---------------- biểu đồ tổng quan ---------------- */
+.delta{font-weight:700;font-size:12.5px;white-space:nowrap}
+.delta.up{color:var(--ok)} .delta.down{color:var(--bad)}
+.mtd{text-align:right;font-size:12.5px;line-height:1.5}
+.mtd b{font-size:20px;letter-spacing:-.4px}
+.vchart{position:relative;height:190px;margin:16px 0 22px 44px}
+.vgrid{position:absolute;inset:0;pointer-events:none;border-bottom:1px solid var(--line)}
+.vgrid div{position:absolute;left:0;right:0;border-top:1px dashed var(--line)}
+.vgrid span{position:absolute;right:calc(100% + 6px);top:-8px;font-size:11px;color:var(--tx3);white-space:nowrap}
+.vbars{position:absolute;inset:0;display:flex;align-items:flex-end;gap:2px}
+.vb{position:relative;flex:1;height:100%;display:flex;align-items:flex-end;cursor:default;outline:none}
+.vb i{display:block;width:100%;background:var(--acc);border-radius:4px 4px 0 0;opacity:.85}
+.vb:hover i,.vb:focus i{opacity:1;box-shadow:0 0 0 2px var(--bg2),0 0 0 3px var(--acc)}
+.vb.today i{background:repeating-linear-gradient(135deg,var(--acc) 0 4px,rgba(214,165,74,.55) 4px 7px)}
+.vx{position:absolute;top:calc(100% + 4px);left:50%;transform:translateX(-50%);font-size:10.5px;color:var(--tx3);white-space:nowrap}
+.vb[data-tip]:hover::after,.vb[data-tip]:focus::after,.hc[data-tip]:hover::after,.hc[data-tip]:focus::after{
+  content:attr(data-tip);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);z-index:30;
+  background:var(--bg4);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font-size:12px;
+  white-space:nowrap;box-shadow:var(--shadow);pointer-events:none}
+.vb:first-child[data-tip]:hover::after,.vb:nth-child(-n+4)[data-tip]:hover::after{left:0;transform:none}
+.vb:nth-last-child(-n+4)[data-tip]:hover::after{left:auto;right:0;transform:none}
+.tblview summary{cursor:pointer;font-size:12.5px;color:var(--tx3)}
+.heat{display:grid;gap:2px;align-items:center}
+.heat .hx{font-size:10.5px;color:var(--tx3);text-align:center}
+.heat .hy{font-size:11.5px;color:var(--tx2)}
+.hc{position:relative;display:block;aspect-ratio:1/1;max-height:30px;border-radius:4px;background:var(--bg3);outline:none}
+.hc::before{content:"";position:absolute;inset:0;border-radius:4px;background:var(--acc);opacity:var(--a)}
+.hc:hover,.hc:focus{box-shadow:0 0 0 2px var(--tx2)}
+.hleg{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:11.5px;color:var(--tx3)}
+.hleg i{width:90px;height:8px;border-radius:9px;background:linear-gradient(90deg,var(--bg3),var(--acc))}
+/* tiến độ của thợ */
+.prog .pstat{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0 8px}
+.prog .pstat div{background:var(--bg3);border-radius:10px;padding:10px 12px}
+.prog .pstat b{display:block;font-size:22px;letter-spacing:-.4px}
+.prog .pstat .pl{display:block;font-size:12px;color:var(--tx2)}
+.pbar{position:relative;height:10px;border-radius:9px;background:var(--bg4);margin:7px 0 4px}
+.pbar i{display:block;height:100%;border-radius:9px;background:var(--acc)}
+.kpi.hit .pbar i{background:var(--ok)}
+.pbar em{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--tx);border-radius:2px;opacity:.7}
+
+/* mất mạng / hoá đơn chờ gửi */
+.qbar{border:1px solid var(--warn);background:rgba(255,184,77,.08);border-radius:12px;padding:10px 12px;margin:0 0 12px;font-size:13.5px;display:grid;gap:8px}
+.qbar.bad{border-color:var(--bad);background:rgba(255,107,107,.07)}
+.qlist{display:grid;gap:6px}
+.qrow{display:flex;gap:10px;align-items:center;background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:8px 10px}

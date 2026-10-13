@@ -56,6 +56,62 @@ function taskWeek(): array {
           'missed' => array_map(function ($x) { return ['title' => $x['title'], 'due' => $x['due'], 'who_name' => $x['who_name']]; }, $bo)];
 }
 
+/* Số liệu biểu đồ ở Tổng quan: doanh thu từng ngày 60 ngày gần nhất, tháng
+   này so với cùng kỳ tháng trước, và giờ đông khách (12 tuần, chỉ hoá đơn có
+   giờ — hoá đơn nhập từ KiotViet không có giờ). */
+function dashCharts(string $nay): array {
+  $ts = strtotime($nay . ' 12:00');
+  $st = db()->prepare('SELECT visit_date d, COUNT(*) n, COALESCE(SUM(amount), 0) s FROM visits
+                        WHERE void_at IS NULL AND visit_date BETWEEN ? AND ? GROUP BY visit_date');
+  $st->execute([date('Y-m-d', $ts - 59 * 86400), $nay]);
+  $co = [];
+  foreach ($st->fetchAll() as $r) $co[$r['d']] = [(int)$r['n'], (int)$r['s']];
+  $daily = [];
+  for ($i = 59; $i >= 0; $i--) {
+    $d = date('Y-m-d', $ts - $i * 86400);
+    $daily[] = ['d' => $d, 'n' => $co[$d][0] ?? 0, 's' => $co[$d][1] ?? 0];
+  }
+  $tong = function (string $a, string $b): array {
+    $st = db()->prepare('SELECT COUNT(*) n, COALESCE(SUM(amount), 0) s FROM visits WHERE void_at IS NULL AND visit_date BETWEEN ? AND ?');
+    $st->execute([$a, $b]);
+    $r = $st->fetch();
+    return ['n' => (int)$r['n'], 's' => (int)$r['s'], 'from' => $a, 'to' => $b];
+  };
+  $dau = substr($nay, 0, 8) . '01';
+  $dauTruoc = date('Y-m-01', strtotime($dau . ' -1 month'));
+  $cuoiTruoc = date('Y-m-t', strtotime($dauTruoc));
+  $cungNgay = min($cuoiTruoc, substr($dauTruoc, 0, 8) . substr($nay, 8, 2));
+  $tuHeat = date('Y-m-d', $ts - 83 * 86400);
+  $st = db()->prepare("SELECT CAST(strftime('%w', visit_date) AS INTEGER) w, CAST(substr(visit_time, 1, 2) AS INTEGER) h, COUNT(*) n
+                         FROM visits WHERE void_at IS NULL AND visit_time <> '' AND visit_date BETWEEN ? AND ? GROUP BY w, h");
+  $st->execute([$tuHeat, $nay]);
+  return ['daily' => $daily, 'mtd' => $tong($dau, $nay), 'mtd_prev' => $tong($dauTruoc, $cungNgay),
+          'prev_month' => $tong($dauTruoc, $cuoiTruoc),
+          'heat' => array_map(function ($r) { return [(int)$r['w'], (int)$r['h'], (int)$r['n']]; }, $st->fetchAll()),
+          'heat_from' => $tuHeat];
+}
+
+/* Tiến độ tháng của một thợ — cho tài khoản thợ tự xem. Chỉ lượt, doanh
+   thu và KPI; KHÔNG có lương (chủ quán dặn). */
+function barberProgress(int $bid, string $m): array {
+  $p = null;
+  foreach (mhPayroll($m)['rows'] as $r) if ($r['id'] === $bid) $p = $r;
+  $nay = mhToday();
+  $soNgay = (int)date('t', strtotime($m . '-01'));
+  $ngay = $m === substr($nay, 0, 7) ? (int)substr($nay, 8, 2) : $soNgay;
+  /* Cùng kỳ tháng trước (ngày 1 → cùng ngày) để thợ so với chính mình. */
+  $dauTruoc = date('Y-m-01', strtotime($m . '-01 -1 month'));
+  $cuoi = min(date('Y-m-t', strtotime($dauTruoc)), substr($dauTruoc, 0, 8) . sprintf('%02d', $ngay));
+  $st = db()->prepare('SELECT COUNT(*) n, COALESCE(SUM(amount), 0) s FROM visits WHERE void_at IS NULL AND barber_id = ? AND visit_date BETWEEN ? AND ?');
+  $st->execute([$bid, $dauTruoc, $cuoi]);
+  $truoc = $st->fetch();
+  return ['month' => $m, 'day' => $ngay, 'days' => $soNgay,
+          'bills' => $p ? $p['bills'] : 0, 'revenue' => $p ? $p['revenue'] : 0,
+          'kpi_now' => $p ? $p['kpi_now'] : ['cuts' => 0, 'combo' => 0, 'chem' => 0, 'prod' => 0],
+          'kpi' => $p ? $p['kpi'] : null,
+          'prev' => ['bills' => (int)$truoc['n'], 'revenue' => (int)$truoc['s'], 'to' => $cuoi]];
+}
+
 /* Khuyến mãi gửi cho màn bán hàng / bảng tin — đủ để tự kiểm điều kiện. */
 function promoPublic(array $p): array {
   return ['id' => $p['id'], 'name' => $p['name'], 'kind' => $p['kind'], 'value' => $p['value'],
@@ -220,7 +276,7 @@ case 'me': {
   $u = mhRequireUser();
   out(['ok' => true, 'user' => ['id' => $u['id'], 'name' => $u['name'], 'role' => $u['role'], 'barber_id' => $u['barber_id']],
        'shop' => MH_SHOP_NAME, 'kinds' => MH_KINDS, 'undo_minutes' => MH_UNDO_MINUTES,
-       'today' => mhToday()]);
+       'today' => mhToday(), 'tier_disc' => mhTierDiscOn()]);
 }
 
 case 'shop': {
@@ -366,7 +422,7 @@ case 'pos_init': {
   out(['ok' => true, 'services' => $svc,
        'barbers' => array_map(function ($b) { return ['id' => $b['id'], 'name' => $b['name']]; }, mhBarbers(true)),
        'promos' => array_map('promoPublic', mhPromos(true)),
-       'groups' => mhGroups(), 'round' => mhRoundCfg(), 'today' => mhToday(),
+       'groups' => mhGroups(), 'round' => mhRoundCfg(), 'today' => mhToday(), 'tier_disc' => mhTierDiscOn(),
        'product_names' => mhProductNames(),
        /* Lịch hẹn hôm nay chưa xong — hiện đầu màn bán hàng, bấm "Khách đến"
           là điền sẵn khách, thợ, dịch vụ. */
@@ -391,16 +447,36 @@ case 'bill_create': {
       out(['ok' => true, 'bill' => $bill, 'new_rewards' => [], 'pending' => 0, 'repeat' => true]);
     }
   }
+  /* Hoá đơn quầy lưu trên máy lúc mất mạng, có mạng lại mới gửi: ngày giờ
+     là lúc bấm thanh toán (offline_at), không phải lúc gửi — nhưng chỉ nhận
+     trong 36 tiếng, quá nữa thì chủ ghi bù. Hoá đơn mang cờ OFFLINE. */
+  $offAt = (int)inp('offline_at', 0);
+  if ($offAt) {
+    if ($ref === null) out(['ok' => false, 'error' => 'Hoá đơn lưu lúc mất mạng thiếu mã — nhập lại tay.'], 400);
+    if ($offAt > time() + 300 || $offAt < time() - 36 * 3600)
+      out(['ok' => false, 'error' => 'Hoá đơn lưu lúc mất mạng đã quá 36 tiếng (hoặc giờ máy quầy sai) — nhờ chủ quán ghi bù.'], 400);
+  }
   $cid = (int)inp('customer_id', 0) ?: null;
   $c = null;
   if ($cid && !($c = mhCustomerRow($cid))) out(['ok' => false, 'error' => 'Không tìm thấy khách.'], 404);
+  /* Mất mạng nên quầy không tra được khách — chỉ ghi SĐT + tên. Gửi lên thì
+     tìm khách theo số (chưa có thì tạo). Lúc tính tiền chưa biết hạng nên
+     hoá đơn này KHÔNG giảm theo hạng (đúng số tiền khách đã trả). */
+  $traSau = false;
+  if (!$cid && $offAt && trim((string)inp('customer_phone', '')) !== '') {
+    $ph = mhPhone((string)inp('customer_phone', ''));
+    if (!preg_match('/^0\d{9}$/', $ph)) out(['ok' => false, 'error' => 'Số điện thoại khách không đủ 10 số.'], 400);
+    $c = mhCustomerRow(mhEnsureCustomer($ph, mb_substr(trim((string)inp('customer_name', '')), 0, 80), $u['id'])['id']);
+    $cid = (int)$c['id'];
+    $traSau = true;
+  }
 
   $items = inp('items', []);
   if (!is_array($items) || !$items) out(['ok' => false, 'error' => 'Chọn ít nhất một dịch vụ.'], 400);
   if (count($items) > 30) out(['ok' => false, 'error' => 'Hoá đơn dài quá.'], 400);
 
   /* Ngày luôn là hôm nay theo máy chủ. Chỉ chủ được ghi bù ngày cũ. */
-  $date = mhToday();
+  $date = $offAt ? mhToday($offAt) : mhToday();
   if ($owner && validDate(inp('date')) && inp('date') <= mhToday()) $date = inp('date');
 
   $sv = [];
@@ -446,17 +522,17 @@ case 'bill_create': {
 
   /* Giảm theo hạng: hạng TRƯỚC hoá đơn này. */
   $tierPct = 0; $tierName = '';
-  if ($c) {
+  if ($c && !$traSau) {
     $stt = mhStats($cid)[$cid];
     $t = mhTierOf($stt['cuts'], $stt['spend'], mhTiers())['tier'];
-    if ($t) { $tierPct = $t['disc_pct']; $tierName = $t['name']; }
+    if ($t && mhTierDiscOn()) { $tierPct = $t['disc_pct']; $tierName = $t['name']; }
   }
   $promo = null;
   if ($pid = (int)inp('promo_id', 0)) {
     foreach (mhPromos(true) as $p) if ($p['id'] === $pid) $promo = $p;
     if (!$promo) out(['ok' => false, 'error' => 'Khuyến mãi này đã hết hạn hoặc bị tắt. Tải lại trang.'], 400);
     $chan = mhPromoBlock($promo, [
-      'date' => $date, 'min' => $date === mhToday() ? mhNowMin() : null,
+      'date' => $date, 'min' => $offAt ? (int)date('G', $offAt) * 60 + (int)date('i', $offAt) : ($date === mhToday() ? mhNowMin() : null),
       'subtotal' => array_sum(array_map(function ($l) { return $l['unit'] * $l['qty']; }, $lines)),
       'cid' => $cid, 'visits' => $c ? mhStats($cid)[$cid]['visits'] : 0,
       'used' => $c && in_array($promo['id'], promosUsed($cid), true),
@@ -503,7 +579,7 @@ case 'bill_create': {
   $pdo->prepare('INSERT INTO visits (customer_id, visit_date, visit_time, amount, subtotal, discount, disc_note, tip,
                                      pay_cash, pay_transfer, mdisc, mdisc_note, source, note, barber_id, created_at, created_by, client_ref, promo_id)
                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      ->execute([$cid, $date, $date === mhToday() ? date('H:i') : '', $q['total'], $q['subtotal'], $q['discount'],
+      ->execute([$cid, $date, $offAt ? date('H:i', $offAt) : ($date === mhToday() ? date('H:i') : ''), $q['total'], $q['subtotal'], $q['discount'],
                  $ghiChuGiam, $tip, $cash, $ck, $q['mdisc'], $lyDo, $owner ? 'owner' : 'counter',
                  mb_substr(trim((string)inp('note', '')), 0, 300), $bid, time(), $u['id'], $ref,
                  $promo && $q['promo_used'] ? $promo['id'] : null]);
@@ -515,6 +591,7 @@ case 'bill_create': {
                    $q['lines'][$i]['net'], $l['unit'], $q['lines'][$i]['disc'], $q['lines'][$i]['mdisc'], $l['detail'],
                    $l['guest'], $l['barber_id'] !== null && $l['barber_id'] !== $bid ? $l['barber_id'] : null]);
   $pdo->commit();
+  if ($offAt) mhAddFlag($vid, 'OFFLINE');
 
   if ($bk = (int)inp('booking_id', 0))
     db()->prepare("UPDATE bookings SET status = 'done', visit_id = ?, updated_at = ? WHERE id = ? AND status IN ('booked', 'arrived')")
@@ -524,7 +601,8 @@ case 'bill_create': {
           . implode(', ', array_map(function ($l) { return ($l['guest'] ? '[bạn ' . $l['guest'] . '] ' : '') . $l['svc']['name'] . ($l['detail'] !== '' ? ' (' . $l['detail'] . ')' : '')
                                                          . ($l['qty'] > 1 ? ' x' . $l['qty'] : ''); }, $lines))
           . ' · ' . $q['total'] . ($tip ? " + tip $tip" : '') . ' · TM ' . $cash . ' / CK ' . $ck
-          . ($q['mdisc'] ? ' · ⚠ giảm tay ' . $q['mdisc'] . ' (' . $lyDo . ')' : ''));
+          . ($q['mdisc'] ? ' · ⚠ giảm tay ' . $q['mdisc'] . ' (' . $lyDo . ')' : '')
+          . ($offAt ? ' · 📴 lưu lúc mất mạng ' . date('d/m H:i', $offAt) . ($traSau ? ', khách ghi theo SĐT (chưa giảm hạng)' : '') : ''));
   $bill = mhVisitList('v.id = ?', [$vid], 1)[0];
   if (!$owner) $bill['customer_phone'] = mhMask((string)$bill['customer_phone']);
   $choQua = 0;
@@ -642,6 +720,7 @@ case 'my_bills': {
   $st->execute([$u['id'], $tu, $den]);
   $b = array_values(array_filter(mhBarbers(), function ($x) use ($u) { return $x['id'] === $u['barber_id']; }))[0] ?? null;
   out(['ok' => true, 'month' => $m, 'barber' => $b ? $b['name'] : '', 'barber_id' => $u['barber_id'], 'rows' => $rows, 'unassigned' => $chua,
+       'progress' => barberProgress($u['barber_id'], $m),
        'reports' => array_map('mhReportRow', $st->fetchAll())]);
 }
 
@@ -1098,6 +1177,7 @@ case 'book_mine': {
   $st2 = db()->prepare('SELECT * FROM barber_off WHERE barber_id = ? AND off_date BETWEEN ? AND ? ORDER BY off_date, start_min');
   $st2->execute([$u['barber_id'], mhToday(), date('Y-m-d', strtotime('+7 days'))]);
   out(['ok' => true, 'rows' => array_map(function ($b) { return mhBookRow($b, false); }, $st->fetchAll()),
+       'progress' => barberProgress($u['barber_id'], substr(mhToday(), 0, 7)),
        'off' => array_map(function ($o) { return ['date' => $o['off_date'], 'start' => (int)$o['start_min'], 'end' => (int)$o['end_min'], 'note' => $o['note']]; }, $st2->fetchAll())]);
 }
 
@@ -1369,7 +1449,7 @@ case 'services_save': {
 
 case 'tiers': {
   mhRequireUser();
-  out(['ok' => true, 'rows' => mhTiers(), 'round' => mhRoundCfg()]);
+  out(['ok' => true, 'rows' => mhTiers(), 'round' => mhRoundCfg(), 'tier_disc' => mhTierDiscOn()]);
 }
 
 case 'tiers_save': {
@@ -1439,6 +1519,22 @@ case 'program_save': {
   }
   mhAudit($u['id'], 'program_save', "#$id $name");
   out(['ok' => true, 'id' => $id]);
+}
+
+/* Bật / tắt nhanh khuyến mãi hoặc chương trình quà — không phải mở form sửa.
+   Tắt thì quầy không chọn được khuyến mãi đó / khách không tích thêm mốc quà
+   nữa; bật lại là chạy tiếp (vẫn theo ngày bắt đầu – kết thúc đã đặt). */
+case 'promo_toggle':
+case 'program_toggle': {
+  $u = mhRequireOwner();
+  $bang = $action === 'promo_toggle' ? 'promos' : 'programs';
+  $id = (int)inp('id', 0); $on = inp('active') ? 1 : 0;
+  $st = db()->prepare("SELECT name FROM $bang WHERE id = ?"); $st->execute([$id]);
+  $ten = $st->fetchColumn();
+  if ($ten === false) out(['ok' => false, 'error' => 'Không tìm thấy — tải lại trang.'], 404);
+  db()->prepare("UPDATE $bang SET active = ? WHERE id = ?")->execute([$on, $id]);
+  mhAudit($u['id'], $action, "#$id $ten · " . ($on ? 'bật' : 'tắt'));
+  out(['ok' => true, 'active' => $on]);
 }
 
 /* Chương trình đã trao quà thì chỉ tắt, không xoá — xoá là mất luôn lịch
@@ -1548,7 +1644,7 @@ case 'dashboard': {
        'reports_open' => (int)db()->query("SELECT COUNT(*) FROM bill_reports WHERE status = 'open'")->fetchColumn(),
        'bookings_today' => (int)$q("SELECT COUNT(*) n FROM bookings WHERE book_date = ? AND status IN ('booked','arrived','done')", [$today])['n'],
        'unconfirmed' => (int)$q("SELECT COUNT(*) n FROM bookings WHERE confirmed = 0 AND status = 'booked' AND book_date >= ?", [$today])['n'],
-       'tasks_week' => taskWeek()]);
+       'tasks_week' => taskWeek(), 'charts' => dashCharts($today)]);
 }
 
 /* ===== nhập file KiotViet =====
@@ -1958,7 +2054,7 @@ case 'payroll_reopen': {
 case 'setting_save': {
   $u = mhRequireOwner();
   $k = (string)inp('key', '');
-  $hop = ['disc_round' => ['1000', '5000', '10000'], 'disc_round_mode' => ['down', 'near']];
+  $hop = ['disc_round' => ['1000', '5000', '10000'], 'disc_round_mode' => ['down', 'near'], 'tier_disc' => ['0', '1']];
   if (!isset($hop[$k])) out(['ok' => false, 'error' => 'Không có mục này.'], 400);
   $v = (string)inp('value', '');
   if (!in_array($v, $hop[$k], true)) out(['ok' => false, 'error' => 'Giá trị không hợp lệ.'], 400);
@@ -2045,8 +2141,12 @@ case 'board': {
   $tuanTruoc = date('Y-m-d', strtotime($nay) - 7 * 86400);
   $km = [];
   foreach (mhPromos(false) as $p) {
-    if (!$p['active']) continue;
-    if ($p['running']) $p['state'] = 'on';
+    /* Khuyến mãi đang tắt: chỉ chủ thấy (để bật lại ngay trên bảng tin). */
+    if (!$p['active']) {
+      if (!$owner || ($p['end_date'] !== '' && $p['end_date'] < $tuanTruoc)) continue;
+      $p['state'] = 'paused';
+    }
+    elseif ($p['running']) $p['state'] = 'on';
     elseif ($p['start_date'] > $nay) $p['state'] = 'soon';
     elseif ($p['end_date'] !== '' && $p['end_date'] >= $tuanTruoc) $p['state'] = 'off';
     else continue;
@@ -2060,7 +2160,7 @@ case 'board': {
          return ['id' => $p['id'], 'name' => $p['name'], 'kind' => $p['kind'], 'steps' => $p['steps'], 'repeat' => $p['repeat'],
                  'start_date' => $p['start_date'], 'end_date' => $p['end_date']];
        }, array_values(array_filter(mhPrograms(true), function ($p) use ($nay) { return $p['end_date'] === '' || $p['end_date'] >= $nay; }))),
-       'tiers' => mhTiers(),
+       'tiers' => mhTiers(), 'tier_disc' => mhTierDiscOn(),
        'services' => array_map(function ($s) { return ['id' => $s['id'], 'name' => $s['name']]; }, mhServices(false)),
        'barbers' => array_map(function ($b) { return ['id' => $b['id'], 'name' => $b['name']]; }, mhBarbers(true)),
        'week' => $owner ? taskWeek() : null]);
