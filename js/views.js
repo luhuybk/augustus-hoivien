@@ -25,6 +25,10 @@ const soBan = v => Math.max(0, ...(v.items || []).map(i => i.guest || 0));
 const ngay = d => d ? d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4) : '';
 const ngayNgan = d => d ? d.slice(8, 10) + '/' + d.slice(5, 7) : '';
 
+/* Công tắc bật / tắt (khuyến mãi, chương trình quà). */
+const congTac = (act, id, on) => `<button type="button" class="sw${on ? ' on' : ''}" data-act="${act}" data-id="${id}" data-on="${on ? 1 : 0}"
+  role="switch" aria-checked="${on ? 'true' : 'false'}" title="${on ? 'Đang bật — bấm để tắt' : 'Đang tắt — bấm để bật'}"><i></i><span>${on ? 'Bật' : 'Tắt'}</span></button>`;
+
 /* Cách lặp của một việc, đọc thành câu: "Hằng tuần: T3 · sáng". */
 const lapNgan = r => ({daily: 'hằng ngày', weekly: 'hằng tuần', monthly: 'hằng tháng', every: 'định kỳ'})[r] || '';
 const lapText = t => {
@@ -76,7 +80,7 @@ const kindName = k => k === 'any' ? 'Mọi lượt ghé' : ((App.kinds || {})[k]
 
 /* Đặc quyền lưu dạng chữ, mỗi dòng một điều — tách ra thành danh sách.
    % giảm của hạng là con số app tự trừ khi tính tiền — luôn đứng đầu. */
-const perksOf = t => (t && t.disc_pct ? ['Giảm ' + t.disc_pct + '% mỗi lần làm dịch vụ'] : [])
+const perksOf = t => (t && t.disc_pct ? ['Giảm ' + t.disc_pct + '% mỗi lần làm dịch vụ' + (App.tierDisc === false ? ' (đang tạm tắt)' : '')] : [])
   .concat(String((t && t.perks) || '').split('\n')
   .map(x => x.replace(/^[\s\-•*✓]+/, '').trim()).filter(Boolean));
 
@@ -356,6 +360,7 @@ const Views = {
       </div>
       ${v.mdisc && !huy ? `<span class="badge warn" title="Giảm thêm tay: ${esc(v.mdisc_note || '')}">⚠ giảm tay</span>` : ''}
       ${(v.flags || []).includes('NO_INVOICE') && !huy ? '<span class="badge bad" title="Đối soát không thấy hoá đơn KiotViet nào cùng ngày">không có HĐ</span>' : ''}
+      ${(v.flags || []).includes('OFFLINE') ? '<span class="badge" title="Quầy lưu lúc mất mạng, gửi lên sau">📴</span>' : ''}
       ${!huy && v.pay_cash + v.pay_transfer > 0 ? `<button class="link" data-act="printBill" data-id="${v.id}" title="In hoá đơn">🖨</button>` : ''}
       ${v.can_void && (App.barbers || []).length ? `<select class="vbsel" data-vb="${v.id}" title="Đổi thợ">
         <option value="0">— thợ —</option>
@@ -423,11 +428,16 @@ const Views = {
     const coTho = (data.barbers || []).length > 0;
     const can = this.posMissing(st, data, q);
 
-    const khach = st.cus ? (st.cus.walkin
+    const khach = st.cus && st.cus.offline
+      ? `<div class="poscus"><div class="grow"><b>${esc(st.cus.name || '(chưa có tên)')}</b>
+           <div class="sub num">${esc(st.cus.phone)}</div>
+           <div class="sub" style="color:var(--warn)">📴 Mất mạng nên chưa tra được hạng — hoá đơn này chưa giảm theo hạng. Gửi lên sẽ tự khớp khách cũ.</div></div>
+           <button class="chip" data-act="posCusClear">Đổi</button></div>`
+      : st.cus ? (st.cus.walkin
       ? `<div class="poscus"><div class="grow"><b>Khách lẻ</b><div class="sub">Không tích hạng, không giảm theo hạng</div></div>
            <button class="chip" data-act="posCusClear">Đổi</button></div>`
       : `<div class="poscus"><div class="grow"><b>${esc(st.cus.name || '(chưa có tên)')}</b> ${tierBadge(st.cus.tier)}
-           <div class="sub num">${esc(st.cus.phone)} · ${st.cus.cuts} lần cắt${st.cus.tier && st.cus.tier.disc_pct ? ` · <b style="color:var(--ok)">giảm ${st.cus.tier.disc_pct}%</b>` : ''}</div></div>
+           <div class="sub num">${esc(st.cus.phone)} · ${st.cus.cuts} lần cắt${st.cus.tier && st.cus.tier.disc_pct ? (App.tierDisc === false ? ' · <span style="color:var(--warn)">giảm theo hạng đang tắt</span>' : ` · <b style="color:var(--ok)">giảm ${st.cus.tier.disc_pct}%</b>`) : ''}</div></div>
            <button class="chip" data-act="open" data-id="${st.cus.id}">Thẻ</button>
            <button class="chip" data-act="posCusClear">Đổi</button></div>
          ${st.cus.gifts && st.cus.gifts.length ? `<div class="giftbox" style="margin:10px 0 0;padding:10px 12px">
@@ -499,6 +509,7 @@ const Views = {
 
     return `<div class="wrap poswrap">
       ${head('Bán hàng', false, owner ? `<input type="date" id="posDate" class="inp" style="width:auto;padding:8px" value="${esc(st.date || App.today)}" max="${esc(App.today)}" title="Chủ quán ghi bù ngày cũ được">` : '')}
+      <div id="qbar">${this.queueBar(App.queue, App.qOpen)}</div>
       ${this.noticeBar()}
       ${st.booking ? `<p class="note" style="margin-top:-4px">📅 Tính tiền cho lịch hẹn ${esc(st.bookingLabel || '')} — thanh toán xong lịch tự đánh dấu "đã tính tiền".</p>`
                    : this.posBookings(data.bookings, data.barbers || [])}
@@ -572,7 +583,8 @@ const Views = {
   },
 
   posResults(st){
-    if (st.err) return `<div class="dim" style="margin-top:8px">${esc(st.err)}</div>`;
+    if (st.err) return `<div class="dim" style="margin-top:8px">${esc(st.err)}${navigator.onLine === false || /mạng/.test(st.err)
+      ? '<br>📴 Mất mạng không tra được khách: bấm <b>+ Khách mới</b>, nhập đủ SĐT + tên — gửi lên sẽ tự khớp khách cũ.' : ''}</div>`;
     if (!st.rows) return '';
     if (!st.rows.length) return `<div class="dim" style="margin-top:8px">Không có khách nào khớp. Khách lần đầu thì bấm <b>Khách mới</b>.</div>`;
     return `<div class="list" style="margin-top:8px">${st.rows.map(r => `
@@ -586,6 +598,18 @@ const Views = {
 
   posDone(st){
     const r = st.done, v = r.bill;
+    if (r.offline) return `<div class="wrap" style="max-width:560px">
+      <div class="card done">
+        <div class="tick" style="background:var(--warn)">⏳</div>
+        <h2 style="text-align:center">Đã thu ${tien(r.total)}</h2>
+        <p class="dim" style="text-align:center;margin:4px 0 14px">${esc(r.label)} · ${r.cash && r.transfer ? `Tiền mặt ${tien(r.cash)} + chuyển khoản ${tien(r.transfer)}` : r.cash ? 'Tiền mặt' : 'Chuyển khoản'}
+          ${st.change ? `<br><b style="color:var(--acc);font-size:16px">Trả lại khách ${tien(st.change)}</b>` : ''}</p>
+        <div class="note" style="color:var(--tx)">📴 <b>Đang mất mạng</b> — hoá đơn đã lưu trên máy này và sẽ tự gửi khi có mạng.
+          Đừng đóng trình duyệt ở chế độ ẩn danh / đừng xoá dữ liệu trình duyệt. Quà và mốc của khách sẽ cập nhật sau khi gửi.</div>
+        ${r.tip ? `<div class="note" style="font-size:14px;color:var(--tx)">💵 Lấy <b>${tien(r.tip)}</b> tiền mặt trong tủ đưa tip cho <b>${esc(r.barber_name || 'thợ')}</b>.</div>` : ''}
+        <button class="btn pri" data-act="posReset" style="margin-top:10px">+ Hoá đơn mới</button>
+      </div>
+    </div>`;
     const tra = v.pay_cash && v.pay_transfer ? `Tiền mặt ${tien(v.pay_cash)} + chuyển khoản ${tien(v.pay_transfer)}`
       : v.pay_cash ? 'Tiền mặt' : 'Chuyển khoản';
     return `<div class="wrap" style="max-width:560px">
@@ -687,6 +711,7 @@ const Views = {
       </div>
       ${chuaGhi.length ? `<p class="note" style="color:var(--warn)">${chuaGhi.length} lượt ghi kiểu cũ chưa có cách trả tiền (${tien(sum(chuaGhi, 'amount'))}) — không tính vào két.</p>` : ''}
       ${this.mdWarn(giamTay)}
+      ${App.queue.length ? `<div id="qbar">${this.queueBar(App.queue, App.qOpen)}</div>` : ''}
       ${d.tasks_left && d.tasks_left.length ? `<button class="note dashlink" data-act="tab" data-id="board" style="color:var(--warn);margin-top:14px">
         ✅ Còn ${d.tasks_left.length} việc hôm nay chưa xong: ${d.tasks_left.map(t => esc(t.title) + (t.late ? ' (trễ)' : '')).join(', ')} — làm rồi tick ở Bảng tin trước khi chốt ca ›</button>` : ''}
       ${this.shift(d, con)}
@@ -1089,6 +1114,7 @@ const Views = {
     return `<div class="wrap">
       ${head('Lịch hẹn của tôi', false, '<button class="chip" data-act="reload">↻</button>')}
       ${this.noticeBar()}
+      ${this.progress(d.progress, true)}
       ${ngayDs.length ? ngayDs.map(n => `<div class="card"><h3>${thuCua(n)} · ${ngay(n)}${n === App.today ? ' · hôm nay' : ''}</h3>
         ${d.off.filter(o => o.date === n).map(o => `<p class="note" style="margin:0 0 8px">Nghỉ ${o.start > 0 || o.end < 1440 ? hm(o.start) + '–' + hm(o.end) : 'cả ngày'}${o.note ? ' · ' + esc(o.note) : ''}</p>`).join('')}
         <div class="list">${d.rows.filter(b => b.date === n).map(b => `<div class="item${b.status === 'done' ? ' void' : ''}">
@@ -1186,6 +1212,7 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
         ${d.month < nay ? `<button class="chip" data-act="mineMonth" data-m="${sau}">›</button>` : ''}`)}
       <p class="dim" style="margin-top:-6px">✂︎ ${esc(d.barber)} · tháng ${esc(d.month.slice(5))}/${esc(d.month.slice(0, 4))}.
         Soát lại từng hoá đơn — thiếu hay sai thì bấm <b>📣 Báo sai</b> trong hoá đơn, hoặc báo thiếu ở cuối trang.</p>
+      ${this.progress(d.progress)}
       <div class="stats">
         <div class="stat"><div class="n">${con.length}</div><div class="l">hoá đơn</div></div>
         <div class="stat"><div class="n">${con.reduce((a, v) => a + monToi(v).filter(i => i.kind === 'cut').reduce((b, i) => b + i.qty, 0), 0)}</div><div class="l">lượt cắt</div></div>
@@ -1486,6 +1513,25 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
 
   /* ---------------- bảng tin: thông báo · việc ở tiệm · khuyến mãi ---------------- */
 
+  /* Mất mạng / hoá đơn chờ gửi — đầu màn Bán hàng và Sổ ngày. */
+  queueBar(q, mo){
+    const cho = q.filter(x => x.status === 'wait'), loi = q.filter(x => x.status === 'err');
+    const mat = navigator.onLine === false;
+    if (!q.length && !mat) return '';
+    return `<div class="qbar${loi.length ? ' bad' : ''}">
+      ${mat ? '<div><b>📴 Đang mất mạng</b> — vẫn tính tiền được: hoá đơn lưu trên máy này, có mạng sẽ tự gửi. Đừng xoá dữ liệu trình duyệt.</div>' : ''}
+      ${q.length ? `<div class="row" style="gap:8px;flex-wrap:wrap">
+        <span class="grow">${cho.length ? `⏳ <b>${cho.length}</b> hoá đơn chờ gửi` : ''}${cho.length && loi.length ? ' · ' : ''}${loi.length ? `⚠ <b>${loi.length}</b> hoá đơn gửi không được` : ''}</span>
+        <button class="chip" data-act="qSend">Gửi ngay</button>
+        <button class="chip" data-act="qToggle">${mo ? 'Ẩn' : 'Xem'}</button></div>
+        ${mo ? `<div class="qlist">${q.map(x => `<div class="qrow">
+          <div class="grow"><b>${esc(x.label)}</b> · ${tien(x.total)} <span class="dim">· ${new Date(x.at).toLocaleString('vi-VN', {hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit'})}</span>
+            ${x.status === 'err' ? `<div style="color:var(--bad);font-size:12.5px">${esc(x.err)}</div>
+              <div class="dim" style="font-size:12px">Nhập lại tay hoá đơn này (hoặc nhờ chủ ghi bù) rồi bấm Bỏ.</div>` : '<div class="dim" style="font-size:12px">chờ có mạng</div>'}</div>
+          ${x.status === 'err' ? `<button class="link bad" data-act="qDrop" data-ref="${esc(x.ref)}">Bỏ</button>` : ''}</div>`).join('')}</div>` : ''}` : ''}
+    </div>`;
+  },
+
   /* Dải nhắc "có thông báo mới" đầu các màn chính. */
   noticeBar(){
     const n = (App.badge || {}).notices || 0;
@@ -1519,6 +1565,7 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
             : `<div class="dim">Hôm nay không có việc nào.${owner ? ' Bấm "+ Thêm việc" để đặt việc (vd. sáng thứ 3 vệ sinh tiệm).' : ''}</div>`}
         </div>
       </div><div>
+        ${this.tierDiscCard(false, d.tiers)}
         ${this.promoBoard(d)}
         ${d.programs.length ? `<div class="card"><h3>🎁 Quà theo mốc</h3>${d.programs.map(p => `
           <div class="bitem"><b>${esc(p.name)}</b>
@@ -1666,8 +1713,24 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
   },
 
   /* Khuyến mãi trên bảng tin: đang chạy · sắp tới · vừa hết (7 ngày). */
+  /* Công tắc chung "giảm giá theo hạng" — ở màn Hạng và trên Bảng tin.
+     Nhân viên chỉ xem: đang giảm bao nhiêu, hay đang tạm tắt. */
+  tierDiscCard(full, tiers){
+    const on = App.tierDisc !== false, owner = API.isOwner();
+    const muc = (tiers || []).filter(t => t.disc_pct > 0).map(t => esc(t.name) + ' −' + t.disc_pct + '%').join(' · ');
+    return `<div class="card tdcard${on ? '' : ' off'}">
+      <div class="row"><h3 class="grow" style="margin:0">🏅 Giảm giá theo hạng thành viên</h3>
+        ${owner ? congTac('tierDiscToggle', 0, on) : `<span class="badge${on ? '' : ' warn'}"${on ? ' style="color:var(--ok)"' : ''}>${on ? 'đang áp dụng' : 'tạm tắt'}</span>`}</div>
+      <div class="dim" style="margin-top:6px;font-size:13px">${on
+        ? (muc ? muc + ' — app tự trừ khi tính tiền.' : 'App tự trừ % của hạng khi tính tiền.') + (full ? ' Tắt đi thì mọi khách trả giá gốc (vẫn giữ hạng, vẫn tích mốc quà).' : '')
+        : '<b style="color:var(--warn)">Đang tạm tắt</b> — khách hạng nào cũng trả giá gốc. Hạng và mốc quà vẫn tính bình thường; khuyến mãi vẫn dùng được.'}</div>
+    </div>`;
+  },
+
   promoBoard(d){
-    const on = d.promos.filter(p => p.state === 'on'), soon = d.promos.filter(p => p.state === 'soon'), off = d.promos.filter(p => p.state === 'off');
+    const owner = API.isOwner();
+    const on = d.promos.filter(p => p.state === 'on'), soon = d.promos.filter(p => p.state === 'soon'),
+          off = d.promos.filter(p => p.state === 'off'), paused = d.promos.filter(p => p.state === 'paused');
     const ten = {}; d.services.forEach(s => { ten[s.id] = s.name; });
     const conLai = p => {
       if (!p.end_date) return 'không giới hạn ngày';
@@ -1675,16 +1738,19 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
       return 'đến hết ' + ngay(p.end_date) + (n === 0 ? ' · <b style="color:var(--warn)">hôm nay là ngày cuối</b>' : ` · còn ${n + 1} ngày`);
     };
     const the = (p, cls) => `<div class="promo ${cls}">
-      <div class="row"><b class="grow">${esc(p.name)}</b><span class="pval">−${p.kind === 'pct' ? p.value + '%' : tienGon(p.value)}</span></div>
+      <div class="row"><b class="grow">${esc(p.name)}</b><span class="pval">−${p.kind === 'pct' ? p.value + '%' : tienGon(p.value)}</span>
+        ${owner && cls !== 'off' ? congTac('promoToggle', p.id, cls !== 'paused') : ''}</div>
       <div class="dim" style="font-size:12.5px">${cls === 'soon' ? 'Bắt đầu ' + ngay(p.start_date) + (p.end_date ? ' → ' + ngay(p.end_date) : '')
-        : cls === 'off' ? 'Đã kết thúc ' + ngay(p.end_date) + ' — <b>không áp nữa</b>' : conLai(p)}</div>
-      ${cls !== 'off' ? `<ul class="perks">${promoConds(p, ten).map(x => `<li>${x}</li>`).join('')}</ul>
+        : cls === 'off' ? 'Đã kết thúc ' + ngay(p.end_date) + ' — <b>không áp nữa</b>'
+        : cls === 'paused' ? '<b>Đang tắt</b> — quầy không chọn được, nhân viên không thấy' : conLai(p)}</div>
+      ${cls !== 'off' && cls !== 'paused' ? `<ul class="perks">${promoConds(p, ten).map(x => `<li>${x}</li>`).join('')}</ul>
         ${p.pitch ? `<div class="pitch">💬 ${esc(p.pitch)}</div>` : ''}` : ''}
     </div>`;
     return `<div class="card"><h3>🏷 Khuyến mãi</h3>
       ${on.length ? on.map(p => the(p, 'on')).join('') : '<div class="dim">Hiện không có khuyến mãi nào đang chạy.</div>'}
       ${soon.length ? `<div class="dim" style="margin:12px 0 6px;font-weight:600">Sắp diễn ra</div>${soon.map(p => the(p, 'soon')).join('')}` : ''}
       ${off.length ? `<div class="dim" style="margin:12px 0 6px;font-weight:600">Vừa kết thúc</div>${off.map(p => the(p, 'off')).join('')}` : ''}
+      ${paused.length ? `<div class="dim" style="margin:12px 0 6px;font-weight:600">Đang tắt (chỉ chủ thấy)</div>${paused.map(p => the(p, 'paused')).join('')}` : ''}
     </div>`;
   },
 
@@ -1710,10 +1776,14 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
     const ck = (ten, on, nhan) => `<label class="check" style="display:flex;gap:8px;align-items:center;font-size:13.5px;color:var(--tx)">
       <input type="checkbox" name="${ten}" value="1"${on ? ' checked' : ''}> ${nhan}</label>`;
     const coDk = p.svc.length || p.wd.length || p.time_from || p.time_to || p.min_total || p.new_only || p.once_per || p.cond_note || p.pitch;
+    const nay = App.today;
+    const tt = !p.active ? '<span class="badge">đã tắt</span>'
+      : p.running ? '<span class="badge" style="color:var(--ok)">đang chạy</span>'
+      : p.start_date > nay ? `<span class="badge warn">chờ tới ${ngayNgan(p.start_date)}</span>` : '<span class="badge">đã hết hạn</span>';
     return `<form class="erow${p.id && !p.running ? ' void' : ''}" data-promo="${p.id}">
       <div class="row"><b class="grow">${p.id ? esc(p.name) : 'Thêm khuyến mãi'}</b>
-        ${p.id ? `<span class="dim" style="font-size:12.5px">đã dùng ${dung} lần</span>` : ''}
-        ${p.id ? (p.running ? '<span class="badge" style="color:var(--ok)">đang chạy</span>' : '<span class="badge">không chạy</span>') : ''}</div>
+        ${p.id ? `<span class="dim" style="font-size:12.5px">đã dùng ${dung} lần</span> ${tt} ${congTac('promoToggle', p.id, p.active)}` : ''}</div>
+      <input type="hidden" name="active" value="${p.active ? 1 : 0}">
       <div class="grid3">
         <div><label>Tên</label><input name="name" value="${esc(p.name)}" placeholder="vd. HSSV"></div>
         <div><label>Kiểu</label><select name="kind"><option value="pct"${p.kind === 'pct' ? ' selected' : ''}>Giảm %</option>
@@ -1721,8 +1791,6 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
         <div><label>Mức giảm (% hoặc đ)</label><input name="value" inputmode="numeric" data-money value="${p.kind === 'amt' ? soTien(p.value) : esc(p.value)}" placeholder="20 hoặc 30.000"></div>
         <div><label>Từ ngày (trống = ngay)</label><input type="date" name="start_date" value="${esc(p.start_date)}"></div>
         <div><label>Đến ngày (trống = không hạn)</label><input type="date" name="end_date" value="${esc(p.end_date)}"></div>
-        <div><label>Trạng thái</label><select name="active"><option value="1"${p.active ? ' selected' : ''}>Bật</option>
-          <option value="0"${p.active ? '' : ' selected'}>Tắt</option></select></div>
       </div>
       <details class="pcond"${coDk || !p.id ? ' open' : ''}><summary>Điều kiện áp dụng${coDk ? '' : ' <span class="dim">(chưa đặt — áp cho mọi khách, mọi lúc)</span>'}</summary>
         <label style="margin-top:8px">Chỉ giảm các dịch vụ này <span class="dim">(không chọn = mọi dịch vụ được giảm)</span></label>
@@ -1779,6 +1847,108 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
     </div>`;
   },
 
+  /* ---------------- biểu đồ tổng quan ---------------- */
+
+  /* % thay đổi so với kỳ trước: "▲ 12%" xanh / "▼ 8%" đỏ. */
+  thayDoi(nay, truoc){
+    if (!truoc) return nay ? '<span class="dim">kỳ trước chưa có số</span>' : '';
+    const p = Math.round((nay - truoc) / truoc * 100);
+    return p === 0 ? '<span class="dim">ngang kỳ trước</span>'
+      : `<span class="delta ${p > 0 ? 'up' : 'down'}">${p > 0 ? '▲' : '▼'} ${Math.abs(p)}%</span>`;
+  },
+
+  charts(c){
+    const d30 = c.daily.slice(-30);
+    const max = Math.max(1, ...d30.map(x => x.s));
+    /* Vạch chia trục dọc: số tròn đẹp (500k, 1tr, 2tr…). */
+    const buoc = [1e5, 2e5, 5e5, 1e6, 2e6, 5e6, 1e7].find(b => max / b <= 4) || 2e7;
+    const dinh = Math.ceil(max / buoc) * buoc;
+    const coNgay = d30.filter(x => x.s > 0);
+    const tb = coNgay.length ? Math.round(coNgay.reduce((a, x) => a + x.s, 0) / coNgay.length) : 0;
+    const cao = d30.reduce((a, x) => x.s > a.s ? x : a, d30[0]);
+    const vach = []; for (let v = buoc; v <= dinh; v += buoc) vach.push(v);
+    const mtd = c.mtd, pv = c.mtd_prev;
+    const thangTruoc = pv.from.slice(5, 7) + '/' + pv.from.slice(0, 4);
+
+    /* Giờ đông khách: hàng = thứ (T2 → CN), cột = giờ có khách. */
+    const gio = c.heat.length ? [Math.min(...c.heat.map(x => x[1])), Math.max(...c.heat.map(x => x[1]))] : [9, 20];
+    const cot = []; for (let h = Math.min(gio[0], 9); h <= Math.max(gio[1], 20); h++) cot.push(h);
+    const o = {}; c.heat.forEach(([w, h, n]) => { o[w + '|' + h] = n; });
+    const hmax = Math.max(1, ...c.heat.map(x => x[2]));
+    const tongHeat = c.heat.reduce((a, x) => a + x[2], 0);
+    const dongNhat = c.heat.slice().sort((a, b) => b[2] - a[2]).slice(0, 3);
+
+    return `<div class="card">
+        <div class="row" style="align-items:flex-start;flex-wrap:wrap;gap:10px 18px">
+          <div class="grow"><h3 style="margin:0">Doanh thu 30 ngày</h3>
+            <div class="dim" style="font-size:13px">Trung bình ${tienGon(tb)}/ngày mở bán · cao nhất ${thuCua(cao.d)} ${ngayNgan(cao.d)}: ${tienGon(cao.s)}</div></div>
+          <div class="mtd"><div class="dim">Tháng này (1–${Number(App.today.slice(8, 10))})</div>
+            <b class="num">${tien(mtd.s)}</b> ${this.thayDoi(mtd.s, pv.s)}
+            <div class="dim">cùng kỳ tháng ${thangTruoc}: ${tien(pv.s)} · ${mtd.n} / ${pv.n} HĐ</div></div>
+        </div>
+        <div class="vchart" role="img" aria-label="Doanh thu từng ngày, 30 ngày gần nhất">
+          <div class="vgrid">${vach.map(v => `<div style="bottom:${v / dinh * 100}%"><span>${tienGon(v)}</span></div>`).join('')}</div>
+          <div class="vbars">${d30.map((x, i) => `<div class="vb${x.d === App.today ? ' today' : ''}" tabindex="0"
+              data-tip="${thuCua(x.d)} ${ngayNgan(x.d)} · ${x.s ? tien(x.s) + ' · ' + x.n + ' HĐ' : 'không có hoá đơn'}">
+              <i style="height:${x.s ? Math.max(1.5, x.s / dinh * 100) : 0}%"></i>
+              ${i % 7 === (d30.length - 1) % 7 ? `<span class="vx">${ngayNgan(x.d)}</span>` : ''}</div>`).join('')}</div>
+        </div>
+        <details class="tblview"><summary>Xem dạng bảng</summary>
+          <div class="tblwrap" style="border:0;max-height:260px;overflow:auto"><table class="tbl" style="font-size:13px">
+            <thead><tr><th>Ngày</th><th class="r">Hoá đơn</th><th class="r">Doanh thu</th></tr></thead>
+            <tbody>${d30.slice().reverse().map(x => `<tr style="cursor:default"><td>${thuCua(x.d)} ${ngay(x.d)}</td><td class="r num">${x.n}</td><td class="r num">${tien(x.s)}</td></tr>`).join('')}</tbody>
+          </table></div></details>
+      </div>
+      <div class="card">
+        <h3 style="margin-bottom:2px">Giờ đông khách</h3>
+        <div class="dim" style="font-size:13px;margin-bottom:10px">${tongHeat
+          ? `12 tuần gần nhất · ${tongHeat} hoá đơn có giờ. Đông nhất: ${dongNhat.map(([w, h, n]) => `${THU[w]} ${h}h (${n})`).join(', ')}.
+             Ô nhạt = giờ vắng — hợp để đặt khuyến mãi "giờ vàng".`
+          : 'Chưa có hoá đơn nào ghi giờ (hoá đơn nhập từ KiotViet không có giờ). Bán hàng trong app vài tuần là bảng này hiện ra.'}</div>
+        ${tongHeat ? `<div class="heat" style="grid-template-columns:30px repeat(${cot.length},minmax(0,1fr))">
+          <span></span>${cot.map(h => `<span class="hx">${h % 2 === 0 ? h + 'h' : ''}</span>`).join('')}
+          ${[1, 2, 3, 4, 5, 6, 0].map(w => `<span class="hy">${THU[w]}</span>${cot.map(h => {
+            const n = o[w + '|' + h] || 0;
+            return `<span class="hc" tabindex="0" data-tip="${THU[w]} · ${h}h–${h + 1}h: ${n} hoá đơn" style="--a:${n ? (0.12 + 0.88 * n / hmax).toFixed(2) : 0}"></span>`;
+          }).join('')}`).join('')}
+        </div>
+        <div class="hleg"><span>ít</span><i></i><span>nhiều (${hmax} HĐ)</span></div>` : ''}
+      </div>`;
+  },
+
+  /* Tiến độ tháng của thợ — ở "Lịch hẹn của tôi" và "Hoá đơn của tôi".
+     Chỉ lượt, doanh thu, KPI; không có lương. */
+  progress(p, gon){
+    if (!p) return '';
+    const dang = p.month === App.today.slice(0, 7);
+    const nhip = p.day / p.days;
+    const ten = {cuts: 'Đầu cắt', combo: 'Combo', chem: 'Doanh thu hoá chất', prod: 'Doanh thu sản phẩm'};
+    const tienK = {chem: true, prod: true};
+    const k = p.kpi || {};
+    const ds = Object.keys(ten).filter(x => k[x]);
+    const so = (x, v) => tienK[x] ? tienGon(v) : v;
+    return `<div class="card prog">
+      <div class="row"><h3 class="grow" style="margin:0">📈 Tháng ${Number(p.month.slice(5))} của bạn</h3>
+        ${dang ? `<span class="dim" style="font-size:12.5px">ngày ${p.day}/${p.days}</span>` : ''}</div>
+      <div class="pstat">
+        <div><b class="num">${p.bills}</b><span class="pl">lượt khách</span>${this.thayDoi(p.bills, p.prev.bills)}</div>
+        <div><b class="num">${tienGon(p.revenue)}</b><span class="pl">doanh thu dịch vụ</span>${this.thayDoi(p.revenue, p.prev.revenue)}</div>
+      </div>
+      <div class="dim" style="font-size:12px;margin:-2px 0 8px">So với cùng kỳ tháng trước (đến ${ngayNgan(p.prev.to)}): ${p.prev.bills} lượt · ${p.prev.revenue ? tienGon(p.prev.revenue) : '0đ'}</div>
+      ${ds.length ? ds.map(x => {
+        const now = p.kpi_now[x] || 0, goal = k[x], pct = Math.min(100, now / goal * 100);
+        const canCo = Math.ceil(goal * nhip);
+        const xong = now >= goal;
+        return `<div class="kpi${xong ? ' hit' : ''}">
+          <div class="row"><span class="grow">${ten[x]}</span><b class="num">${so(x, now)}</b><span class="dim">/ ${so(x, goal)}</span></div>
+          <div class="pbar"><i style="width:${pct.toFixed(1)}%"></i>${dang && !xong ? `<em style="left:${(nhip * 100).toFixed(1)}%" title="Nhịp cần có hôm nay"></em>` : ''}</div>
+          <div class="dim" style="font-size:12px">${xong ? '🎉 Đạt mục tiêu!' : !dang ? `Thiếu ${so(x, goal - now)}`
+            : now >= canCo ? `✓ Đúng nhịp — còn ${so(x, goal - now)} nữa là đạt` : `Chậm nhịp ${so(x, canCo - now)} — cần ~${so(x, Math.ceil((goal - now) / Math.max(1, p.days - p.day + 1)))}/ngày`}</div>
+        </div>`;
+      }).join('') : `<div class="dim" style="font-size:13px">${gon ? '' : `Đầu cắt ${p.kpi_now.cuts} · Combo ${p.kpi_now.combo} · Hoá chất ${tienGon(p.kpi_now.chem)} · Sản phẩm ${tienGon(p.kpi_now.prod)}. `}Chủ tiệm chưa đặt mục tiêu tháng này.</div>`}
+    </div>`;
+  },
+
   /* ---------------- tổng quan (chủ) ---------------- */
 
   dash(d){
@@ -1794,10 +1964,12 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
       ${d.bookings_today ? `<button class="note dashlink" data-act="tab" data-id="sched" style="width:100%;text-align:left">📅 Hôm nay có ${d.bookings_today} lịch hẹn${d.unconfirmed ? ` · <b style="color:var(--warn)">${d.unconfirmed} lịch khách tự đặt chưa xác nhận</b>` : ''} ›</button>` : ''}
       <div class="stats">
         <div class="stat"><div class="n">${tienGon(d.today.amount)}</div><div class="l">doanh thu hôm nay · ${d.today.visits} HĐ</div></div>
-        <div class="stat"><div class="n">${tienGon(d.month.amount)}</div><div class="l">doanh thu tháng này · ${d.month.visits} HĐ</div></div>
+        <div class="stat"><div class="n">${tienGon(d.month.amount)}</div><div class="l">doanh thu tháng này · ${d.month.visits} HĐ
+          ${d.charts ? '<br>' + this.thayDoi(d.charts.mtd.s, d.charts.mtd_prev.s) + ' <span class="dim">cùng kỳ</span>' : ''}</div></div>
         <div class="stat hot"><div class="n">${d.pending_total}</div><div class="l">quà chờ trao</div></div>
         <div class="stat"><div class="n">${d.month.gifts_given}</div><div class="l">quà đã trao tháng này</div></div>
       </div>
+      ${d.charts ? this.charts(d.charts) : ''}
       <div class="cols">
         <div class="card"><h3>Khách theo hạng</h3>
           ${d.tiers.map(t => `<div class="tbar"><div class="t">${tierBadge(t)}</div>
@@ -1808,11 +1980,11 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
         </div>
         ${d.barbers.length || d.no_barber ? `<div class="card"><h3>Thợ cắt tháng này</h3>
           ${d.barbers.length ? `<div class="tblwrap" style="border:0"><table class="tbl" style="font-size:13.5px">
-            <thead><tr><th>Thợ</th><th class="r">Lượt</th><th class="r">Khách</th><th class="r" title="Khách đã từng cắt với chính thợ này trước tháng này">Quay lại</th><th class="r">Tiền DV</th></tr></thead>
+            <thead><tr><th>Thợ</th><th class="r">Lượt</th><th class="r">Khách</th><th class="r" title="Khách đã từng cắt với chính thợ này trước tháng này">Quay lại</th><th class="r">Tiền DV</th><th class="r" title="Trung bình mỗi hoá đơn">TB/HĐ</th></tr></thead>
             <tbody>${d.barbers.map(b => `<tr style="cursor:default"><td><b>${esc(b.name)}</b></td><td class="r num">${b.visits}</td>
               <td class="r num">${b.customers}</td>
               <td class="r num">${b.returning} <span class="dim">(${b.customers ? Math.round(b.returning / b.customers * 100) : 0}%)</span></td>
-              <td class="r num">${tienGon(b.amount)}</td></tr>`).join('')}</tbody></table></div>` : ''}
+              <td class="r num">${tienGon(b.amount)}</td><td class="r num">${b.visits ? tienGon(Math.round(b.amount / b.visits)) : '—'}</td></tr>`).join('')}</tbody></table></div>` : ''}
           ${d.no_barber ? `<div class="dim" style="margin-top:6px;color:var(--warn)">${d.no_barber} lượt tháng này chưa ghi thợ.</div>` : ''}
         </div>` : ''}
         <div class="card"><h3>Quầy ghi tháng này</h3>
@@ -1940,12 +2112,15 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
       ${head('Quà theo mốc', true)}
       <p class="note">Mỗi chương trình đếm số lượt khách làm một loại dịch vụ, đủ mốc thì có quà.
         Chỉ lượt từ <b>ngày bắt đầu</b> trở đi mới được đếm — lịch sử cũ nhập từ KiotViet chỉ tính vào hạng.</p>
-      ${rows.map(p => `<button class="card item" data-act="editProg" data-id="${p.id}" style="display:block">
-        <div class="row"><b class="grow">${esc(p.name)}</b>
-          ${p.active ? '<span class="badge" style="color:var(--ok)">đang chạy</span>' : '<span class="badge">tắt</span>'}</div>
-        <div class="sub">${esc(kindName(p.kind))} · ${p.steps.map(s => `lần ${s.at} → ${esc(s.gift)}`).join(' · ')}</div>
-        <div class="dim">${p.repeat ? 'Lặp lại vòng mới' : 'Chỉ một vòng'} · từ ${ngay(p.start_date)}${p.end_date ? ' đến ' + ngay(p.end_date) : ''}</div>
-      </button>`).join('')}
+      ${rows.map(p => `<div class="card row progrow${p.active ? '' : ' off'}">
+        <button class="grow" data-act="editProg" data-id="${p.id}" style="text-align:left;color:inherit;font:inherit;padding:0">
+          <div class="row"><b class="grow">${esc(p.name)}</b>
+            ${p.active ? '<span class="badge" style="color:var(--ok)">đang chạy</span>' : '<span class="badge">đã tắt</span>'}</div>
+          <div class="sub">${esc(kindName(p.kind))} · ${p.steps.map(s => `lần ${s.at} → ${esc(s.gift)}`).join(' · ')}</div>
+          <div class="dim">${p.repeat ? 'Lặp lại vòng mới' : 'Chỉ một vòng'} · từ ${ngay(p.start_date)}${p.end_date ? ' đến ' + ngay(p.end_date) : ''}</div>
+        </button>
+        ${congTac('progToggle', p.id, p.active)}
+      </div>`).join('')}
       <button class="btn pri" data-act="editProg" data-id="0">+ Thêm chương trình</button>
     </div>`;
   },
@@ -2012,6 +2187,7 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
     round = round || [1000, 'down'];
     return `<div class="wrap">
       ${head('Hạng thành viên', true)}
+      ${this.tierDiscCard(true)}
       <div class="card"><h3>Làm tròn giá sau giảm</h3>
         <p class="dim" style="margin:0 0 10px">Giảm % cho ra giá lẻ (170k −5% = 161.500đ). Chọn cách làm tròn giá khách trả cho mỗi món:</p>
         <div class="grid2" style="max-width:520px">
@@ -2220,7 +2396,7 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
       payroll_adjust: 'Thưởng / trừ lương', payroll_adjust_del: 'Xoá thưởng / trừ', barbers_save: 'Sửa thợ',
       reward_ungive: 'Hoàn quà', customer_create: 'Thêm khách', customer_update: 'Sửa khách',
       services_save: 'Sửa dịch vụ', tiers_save: 'Sửa hạng', program_save: 'Sửa chương trình',
-      program_del: 'Xoá chương trình', program_off: 'Tắt chương trình', import: 'Nhập KiotViet',
+      program_del: 'Xoá chương trình', program_off: 'Tắt chương trình', promo_toggle: 'Bật/tắt khuyến mãi', program_toggle: 'Bật/tắt chương trình quà', import: 'Nhập KiotViet',
       user_save: 'Sửa tài khoản', change_password: 'Đổi mật khẩu', report_add: '📣 Báo sai', report_resolve: 'Xử lý báo sai',
       shift_close: 'Chốt ca', cash_move: 'Tiền ngoài luồng', cash_move_del: 'Xoá tiền ngoài luồng', visit_barber: 'Đổi thợ',
       task_save: 'Đặt việc', task_del: 'Xoá việc', task_done: '✅ Làm xong việc', task_undo: 'Bỏ đánh dấu việc',

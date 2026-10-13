@@ -35,6 +35,10 @@ const App = {
   boardUi: {ntEdit: null, tkNew: false, tkOpen: '', tkSteps: {}, tkPhoto: {}, tkNote: {}},
   taskUi: {tkEdit: null},
   badge: {notices: 0, tasks: 0},
+  tierDisc: true,
+  /* Hoá đơn lưu trên máy lúc mất mạng, chờ gửi — xem queueFlush. */
+  queue: [],
+  qOpen: false,         /* công tắc chung "giảm giá theo hạng" (settings.tier_disc) */
 
   iso(x){ return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0'); },
   addDays(d, n){ const x = new Date(d + 'T00:00:00'); x.setDate(x.getDate() + n); return this.iso(x); },
@@ -85,6 +89,15 @@ const App = {
       try{ this.applyMe(await API.call('me')); await this.badgeRefresh(true); }
       catch(e){ /* hết phiên thì API.call đã dọn token; lỗi mạng thì vẫn thử vẽ */ }
     }
+    this.queueLoad();
+    window.addEventListener('online',  () => { this.drawQbar(); this.queueFlush(); });
+    window.addEventListener('offline', () => this.drawQbar());
+    setInterval(() => { if (this.queue.some(x => x.status === 'wait')) this.queueFlush(); }, 20000);
+    /* Service worker giữ sẵn trang + css/js trên máy: mất mạng mà lỡ tải lại
+       trang thì app vẫn mở được để tính tiền. Chỉ bật trên máy chủ thật. */
+    if ('serviceWorker' in navigator && location.protocol === 'https:')
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    this.queueFlush();
     /* Máy quầy mở cả ngày: vài phút hỏi một lần có thông báo / việc mới không. */
     setInterval(() => { if (!document.hidden) this.badgeRefresh(true); }, 3 * 60 * 1000);
     this.go(this.homeTab());
@@ -94,6 +107,7 @@ const App = {
 
   applyMe(r){
     this.kinds = r.kinds; this.shop = r.shop; this.today = r.today; this.undoMinutes = r.undo_minutes;
+    if (r.tier_disc !== undefined) this.tierDisc = r.tier_disc;
     API.save(API.token, r.user);
   },
 
@@ -188,7 +202,17 @@ const App = {
       case 'pos': {
         /* Mỗi lần vào lại tải dịch vụ / khuyến mãi — chủ vừa đổi giá ở máy
            khác thì quầy thấy ngay, khỏi lệch tiền lúc thanh toán. */
-        this.posData = await API.call('pos_init');
+        try{
+          this.posData = await API.call('pos_init');
+          try{ localStorage.setItem('memberhub.posinit', JSON.stringify(this.posData)); }catch(e){}
+        }catch(err){
+          /* Mất mạng: dùng bảng giá lần trước đã lưu trên máy. */
+          let cu = null;
+          try{ cu = JSON.parse(localStorage.getItem('memberhub.posinit') || 'null'); }catch(e){}
+          if (err.code !== 'offline' || !cu) throw err;
+          this.posData = cu;
+        }
+        this.tierDisc = this.posData.tier_disc;
         if (!this.pos) this.posReset();
         this.drawPos();
         const q = $('#posQ');
@@ -247,6 +271,7 @@ const App = {
         break;
       case 'board':
         this.data.board = await API.call('board');
+        this.tierDisc = this.data.board.tier_disc;
         this.drawBoard();
         this.badgeRefresh(true);
         break;
@@ -304,6 +329,7 @@ const App = {
         this.data.tierEdit = t.rows.map(x => Object.assign({}, x));
         this.data.all = all.rows;
         this.data.round = t.round;
+        this.tierDisc = t.tier_disc;
         this.data.svcRef = sv.rows.filter(x => x.active && x.price > 0 && x.discountable);
         this.drawTiers();
         break;
@@ -449,7 +475,7 @@ const App = {
     };
     const tong = o => Object.values(o).reduce((a, b) => a + b, 0);
     const t = st.cus && !st.cus.walkin && st.cus.tier ? st.cus.tier : null;
-    const tierPct = t ? t.disc_pct || 0 : 0;
+    const tierPct = t && this.posData.tier_disc !== false ? t.disc_pct || 0 : 0;
     const tier = tierPct > 0 ? pct(tierPct, hangIdx) : {};
     let promo = (this.posData.promos || []).find(p => p.id === st.promo) || null;
     if (promo && this.promoBlock(promo)) promo = null;
@@ -486,6 +512,7 @@ const App = {
     if (p.min_total > 0 && sub < p.min_total) return 'Hoá đơn từ ' + tien(p.min_total);
     const cus = st.cus && !st.cus.walkin ? st.cus : null;
     if ((p.new_only || p.once_per) && !cus) return 'Nhập SĐT khách để kiểm tra';
+    if ((p.new_only || p.once_per) && cus.offline) return 'Mất mạng — không kiểm tra được khách';
     if (p.new_only && cus.visits > 0) return 'Chỉ cho khách lần đầu đến';
     if (p.once_per && (cus.promo_used || []).includes(p.id)) return 'Khách đã dùng khuyến mãi này rồi';
     const md = l => l.mdOpen ? Number(String(l.mdisc || '').replace(/\D/g, '')) || 0 : 0;
@@ -569,8 +596,11 @@ const App = {
     const cash = st.pay === 'cash' ? tong : st.pay === 'mix' ? st.cashPartN : 0;
     el.disabled = true;
     let r;
-    try{ r = await API.call('bill_create', {
-      customer_id: st.cus && !st.cus.walkin ? st.cus.id : 0,
+    const off = st.cus && st.cus.offline;
+    const payload = {
+      customer_id: st.cus && !st.cus.walkin && !off ? st.cus.id : 0,
+      customer_phone: off ? st.cus.phone : undefined, customer_name: off ? st.cus.name : undefined,
+      offline_at: off ? Math.floor(Date.now() / 1000) : undefined,
       barber_id: st.barber || 0,
       items: st.lines.map((l, i) => ({service_id: l.sid, qty: l.qty, price: Number(l.price) || undefined, mdisc: q.lines[i].mdisc,
                                       detail: (l.detail || '').trim(), guest: l.guest || 0,
@@ -578,8 +608,12 @@ const App = {
       promo_id: st.promo && !this.promoBlock((this.posData.promos || []).find(p => p.id === st.promo) || {wd: [], svc: []}) ? st.promo : 0,
       mdisc_reason: st.mdReason,
       tip: st.tipN, pay_cash: cash, pay_transfer: tong - cash, note: st.note,
-      expect_total: q.total, date: API.isOwner() ? st.date : undefined, client_ref: st.ref, booking_id: st.booking || 0});
-    }catch(err){
+      expect_total: q.total, date: API.isOwner() ? st.date : undefined, client_ref: st.ref, booking_id: st.booking || 0};
+    try{ r = await API.call('bill_create', payload); }
+    catch(err){
+      /* Mất mạng: lưu hoá đơn trên máy, có mạng tự gửi. Khách đã trả tiền
+         rồi — không bắt khách đứng chờ wifi. */
+      if (err.code === 'offline') return this.posOffline(payload, tong, cash);
       /* Giá / hạng / khuyến mãi vừa đổi ở máy khác: tải lại rồi vẽ lại để
          quầy thấy số mới, bấm thanh toán lần nữa. */
       if (err.code === 'price_changed'){ this.posData = await API.call('pos_init'); this.drawPos(); }
@@ -592,6 +626,63 @@ const App = {
     this.data.card = null;
     window.scrollTo(0, 0);
     this.drawPos();
+  },
+
+  posOffline(payload, tong, cash){
+    const st = this.pos;
+    payload.offline_at = payload.offline_at || Math.floor(Date.now() / 1000);
+    const tho = (this.posData.barbers || []).find(b => b.id === payload.barber_id);
+    this.queue.push({ref: payload.client_ref, payload, at: Date.now(), status: 'wait', err: '', total: tong,
+                     label: st.cus && !st.cus.walkin ? (st.cus.name || st.cus.phone) : 'Khách lẻ'});
+    this.queueSave();
+    st.done = {offline: true, total: tong, tip: st.tipN, cash, transfer: tong - cash, label: this.queue[this.queue.length - 1].label,
+               barber_name: tho ? tho.name : ''};
+    st.change = st.pay === 'cash' && st.givenN > tong ? st.givenN - tong : 0;
+    toast('Mất mạng — đã lưu hoá đơn trên máy, có mạng sẽ tự gửi', 'ok');
+    window.scrollTo(0, 0);
+    this.drawPos();
+  },
+
+  /* ---------------- hàng chờ gửi (mất mạng) ---------------- */
+
+  queueLoad(){
+    try{ this.queue = JSON.parse(localStorage.getItem('memberhub.queue') || '[]'); }catch(e){ this.queue = []; }
+  },
+  queueSave(){
+    try{ localStorage.setItem('memberhub.queue', JSON.stringify(this.queue)); }catch(e){}
+    this.drawQbar();
+  },
+
+  /* Gửi lần lượt. Máy chủ nhận ra hoá đơn đã gửi rồi nhờ client_ref, nên
+     gửi lặp không sinh hoá đơn đôi. Lỗi mạng thì dừng chờ lượt sau; lỗi
+     khác (vd. khách đã có hoá đơn cắt hôm nay) thì để lại cho quầy xem. */
+  async queueFlush(all){
+    if (this._qBusy || !API.token) return;
+    const ds = this.queue.filter(x => x.status === 'wait' || (all && x.status === 'err'));
+    if (!ds.length) return;
+    this._qBusy = true;
+    let xong = 0;
+    try{
+      for (const x of ds){
+        try{
+          await API.call('bill_create', x.payload);
+          this.queue = this.queue.filter(y => y.ref !== x.ref);
+          xong++;
+        }catch(err){
+          if (err.code === 'offline' || err.code === 'session_expired') break;
+          x.status = 'err'; x.err = err.message;
+        }
+        this.queueSave();
+      }
+    }finally{ this._qBusy = false; }
+    if (xong) toast(`Đã gửi ${xong} hoá đơn lưu lúc mất mạng ✓`, 'ok');
+    if (this.queue.some(x => x.status === 'err')) this.qOpen = true;
+    this.drawQbar();
+  },
+
+  drawQbar(){
+    const b = $('#qbar');
+    if (b) b.innerHTML = Views.queueBar(this.queue, this.qOpen);
   },
 
   /* In qua khung ẩn — app thêm ra màn hình chính thì cửa sổ bật lên bị chặn. */
@@ -1223,6 +1314,7 @@ const App = {
           return;
         }
         case 'logout':
+          if (this.queue.length) return toast(`Còn ${this.queue.length} hoá đơn lưu lúc mất mạng chưa gửi — gửi xong mới đăng xuất.`, 'bad');
           try{ await API.call('logout'); }catch(err){}
           API.clear();
           /* Máy quầy dùng chung: chủ đăng xuất xong thì danh sách khách (có
@@ -1340,6 +1432,34 @@ const App = {
         case 'importGo':
           el.disabled = true;               // bấm hai lần là gửi hai lượt ghi
           return await this.importRun(true);
+
+        case 'qToggle': this.qOpen = !this.qOpen; return this.drawQbar();
+        case 'qSend':   return await this.queueFlush(true);
+        case 'qDrop': {
+          if (!this.hoiLai(el, 'Bỏ thật?')) return;
+          this.queue = this.queue.filter(x => x.ref !== el.dataset.ref);
+          this.queueSave();
+          return toast('Đã bỏ hoá đơn này khỏi hàng chờ', 'ok');
+        }
+
+        /* Công tắc bật / tắt khuyến mãi, chương trình quà — lưu ngay. */
+        case 'tierDiscToggle': {
+          const bat = !this.tierDisc;
+          if (!bat && !this.hoiLai(el, 'Tắt giảm theo hạng?')) return;
+          el.disabled = true;
+          await API.call('setting_save', {key: 'tier_disc', value: bat ? '1' : '0'});
+          this.tierDisc = bat;
+          toast(bat ? 'Đã bật lại giảm giá theo hạng' : 'Đã tắt giảm giá theo hạng — khách trả giá gốc', 'ok');
+          return this.render();
+        }
+        case 'promoToggle':
+        case 'progToggle': {
+          const bat = el.dataset.on !== '1';
+          el.disabled = true;
+          await API.call(act === 'promoToggle' ? 'promo_toggle' : 'program_toggle', {id, active: bat ? 1 : 0});
+          toast((act === 'promoToggle' ? 'Khuyến mãi' : 'Chương trình quà') + (bat ? ' đã bật' : ' đã tắt'), 'ok');
+          return this.render();
+        }
 
         /* ----- bảng tin ----- */
         case 'photoClose': return el.remove();
@@ -1725,7 +1845,18 @@ const App = {
       if (f.id === 'posNewCus'){
         let id;
         try{ id = (await API.call('customer_create', {name: v.name, phone: v.phone})).id; toast('Đã thêm khách', 'ok'); }
-        catch(err){ if (err.code !== 'exists') throw err; id = err.data.id; toast(err.message, ''); }
+        catch(err){
+          if (err.code === 'offline'){
+            /* Mất mạng: ghi SĐT + tên, gửi lên máy chủ tự khớp khách cũ / tạo khách mới. */
+            const ph = String(v.phone || '').replace(/\D/g, '');
+            if (!/^0\d{9}$/.test(ph)) throw new Error('Mất mạng nên phải nhập đủ 10 số điện thoại để khớp khách sau.');
+            this.pos.newCus = false;
+            this.pos.cus = {offline: true, phone: ph, name: (v.name || '').trim(), cuts: 0, tier: null, gifts: [], visits: 0, promo_used: []};
+            return this.drawPos();
+          }
+          if (err.code !== 'exists') throw err;
+          id = err.data.id; toast(err.message, '');
+        }
         this.pos.newCus = false;
         return await this.posPick(id);
       }

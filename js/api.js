@@ -51,7 +51,10 @@ const API = {
         body: JSON.stringify(Object.assign({action}, this.token ? {_t: this.token} : {}, data))
       });
     }catch(e){
-      throw new Error('Không có mạng. Kiểm tra wifi rồi thử lại.');
+      /* code 'offline' để màn bán hàng biết mà lưu hoá đơn lại trên máy. */
+      const err = new Error('Không có mạng. Kiểm tra wifi rồi thử lại.');
+      err.code = 'offline';
+      throw err;
     }
     let j;
     try{ j = await res.json(); }

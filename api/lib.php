@@ -993,6 +993,11 @@ function mhBillCode(array $v): string {
    Giảm theo % thì làm tròn GIÁ SAU GIẢM của từng món theo bước chủ chọn
    ($round = 5000 / 10000, $mode 'down' = xuống, có lợi cho khách; 'near'
    = gần nhất): cắt 170k hạng Đồng −5% = 161.500 → 160.000. */
+/* Công tắc chung "giảm giá theo hạng": tắt thì khách hạng nào cũng trả giá
+   gốc (vẫn giữ hạng, vẫn tích mốc quà) — dùng khi quán chạy chương trình
+   riêng hay tạm ngưng ưu đãi. Mặc định bật. */
+function mhTierDiscOn(): bool { return mhSetting('tier_disc', '1') !== '0'; }
+
 function mhRoundCfg(): array {
   $b = (int)mhSetting('disc_round', '5000');
   return [in_array($b, [1000, 5000, 10000], true) ? $b : 1000, mhSetting('disc_round_mode', 'down') === 'near' ? 'near' : 'down'];
