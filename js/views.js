@@ -1114,7 +1114,7 @@ const Views = {
     return `<div class="wrap">
       ${head('Lịch hẹn của tôi', false, '<button class="chip" data-act="reload">↻</button>')}
       ${this.noticeBar()}
-      ${this.progress(d.progress, true)}
+      ${this.barberProg(d.progress, true)}
       ${ngayDs.length ? ngayDs.map(n => `<div class="card"><h3>${thuCua(n)} · ${ngay(n)}${n === App.today ? ' · hôm nay' : ''}</h3>
         ${d.off.filter(o => o.date === n).map(o => `<p class="note" style="margin:0 0 8px">Nghỉ ${o.start > 0 || o.end < 1440 ? hm(o.start) + '–' + hm(o.end) : 'cả ngày'}${o.note ? ' · ' + esc(o.note) : ''}</p>`).join('')}
         <div class="list">${d.rows.filter(b => b.date === n).map(b => `<div class="item${b.status === 'done' ? ' void' : ''}">
@@ -1212,7 +1212,7 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
         ${d.month < nay ? `<button class="chip" data-act="mineMonth" data-m="${sau}">›</button>` : ''}`)}
       <p class="dim" style="margin-top:-6px">✂︎ ${esc(d.barber)} · tháng ${esc(d.month.slice(5))}/${esc(d.month.slice(0, 4))}.
         Soát lại từng hoá đơn — thiếu hay sai thì bấm <b>📣 Báo sai</b> trong hoá đơn, hoặc báo thiếu ở cuối trang.</p>
-      ${this.progress(d.progress)}
+      ${this.barberProg(d.progress)}
       <div class="stats">
         <div class="stat"><div class="n">${con.length}</div><div class="l">hoá đơn</div></div>
         <div class="stat"><div class="n">${con.reduce((a, v) => a + monToi(v).filter(i => i.kind === 'cut').reduce((b, i) => b + i.qty, 0), 0)}</div><div class="l">lượt cắt</div></div>
@@ -1918,7 +1918,7 @@ define('MH_BACKUP_PASS', 'mật khẩu mở tệp — ghi ra giấy');</pre></li
 
   /* Tiến độ tháng của thợ — ở "Lịch hẹn của tôi" và "Hoá đơn của tôi".
      Chỉ lượt, doanh thu, KPI; không có lương. */
-  progress(p, gon){
+  barberProg(p, gon){
     if (!p) return '';
     const dang = p.month === App.today.slice(0, 7);
     const nhip = p.day / p.days;

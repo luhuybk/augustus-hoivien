@@ -6,8 +6,8 @@
    - api/: KHÔNG bao giờ đi qua đây — dữ liệu luôn lấy thẳng từ máy chủ;
      hoá đơn lúc mất mạng do app.js tự giữ (hàng chờ gửi).
    build.js điền mã bản và danh sách tệp lúc dựng. */
-const CACHE = 'hoivien-7a7d7a02';
-const ASSETS = ["css/style.css?v=7a7d7a02","js/api.js?v=7a7d7a02","js/kiotviet.js?v=7a7d7a02","js/views.js?v=7a7d7a02","js/app.js?v=7a7d7a02","icon.svg","manifest.webmanifest"];
+const CACHE = 'hoivien-68ec128c';
+const ASSETS = ["css/style.css?v=68ec128c","js/api.js?v=68ec128c","js/kiotviet.js?v=68ec128c","js/views.js?v=68ec128c","js/app.js?v=68ec128c","icon.svg","manifest.webmanifest"];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(['./'].concat(ASSETS))).then(() => self.skipWaiting()));
